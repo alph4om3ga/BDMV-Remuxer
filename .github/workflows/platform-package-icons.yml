@@ -1,0 +1,86 @@
+name: Native package icon checks
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/platform-package-icons.yml"
+      - "package.json"
+      - "package-lock.json"
+      - "scripts/verify-platform-icons.mjs"
+      - "src-tauri/**"
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/platform-package-icons.yml"
+      - "package.json"
+      - "package-lock.json"
+      - "scripts/verify-platform-icons.mjs"
+      - "src-tauri/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    name: Windows MSI icon
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+      - run: npm ci
+      - run: node scripts/verify-platform-icons.mjs
+      - name: Build Windows installer
+        run: npm run tauri -- build --bundles msi --ci
+      - name: Verify installer and executable icon
+        shell: pwsh
+        run: |
+          $msi = Get-ChildItem "src-tauri/target/release/bundle/msi" -Filter "*.msi" -File
+          if (-not $msi) { throw "Tauri did not produce a Windows MSI package." }
+
+          $exe = Resolve-Path "src-tauri/target/release/bdmv-remuxer.exe"
+          Add-Type -AssemblyName System.Drawing
+          $icon = [System.Drawing.Icon]::ExtractAssociatedIcon($exe.Path)
+          if (-not $icon) { throw "The packaged application executable has no readable icon resource." }
+          if ($icon.Width -lt 16 -or $icon.Height -lt 16) {
+            throw "The executable icon is too small: $($icon.Width)x$($icon.Height)."
+          }
+          Write-Host "Verified $($msi.Count) MSI package(s) and executable icon: $($icon.Width)x$($icon.Height)."
+
+  macos:
+    name: macOS app and DMG icons
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+      - run: npm ci
+      - run: node scripts/verify-platform-icons.mjs
+      - name: Build macOS app and disk image
+        run: npm run tauri -- build --bundles app,dmg --ci
+      - name: Verify packaged app icon metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          app="$(find src-tauri/target/release/bundle/macos -maxdepth 1 -type d -name '*.app' -print -quit)"
+          dmg="$(find src-tauri/target/release/bundle/dmg -maxdepth 1 -type f -name '*.dmg' -print -quit)"
+          test -n "$app" || { echo "Tauri did not produce a macOS .app bundle." >&2; exit 1; }
+          test -n "$dmg" || { echo "Tauri did not produce a macOS disk image." >&2; exit 1; }
+
+          icon_name="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIconFile' "$app/Contents/Info.plist")"
+          icon_path="$app/Contents/Resources/$icon_name"
+          if [ ! -f "$icon_path" ] && [ -f "$icon_path.icns" ]; then
+            icon_path="$icon_path.icns"
+          fi
+          test -f "$icon_path" || { echo "The app's CFBundleIconFile does not exist in Contents/Resources." >&2; exit 1; }
+          node scripts/verify-platform-icons.mjs --packaged-icns "$icon_path"
+          hdiutil verify "$dmg"
+          echo "Verified app bundle icon metadata and disk image: $dmg"
