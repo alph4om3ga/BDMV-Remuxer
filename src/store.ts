@@ -239,8 +239,8 @@ export const useAppStore = create<AppStore>((set, get) => ({
 
   loadSettings: async () => {
     try {
-      const settings = await invoke<Settings>('get_settings');
-      set({ settings });
+      const response = await invoke<{ settings: Settings; recovery_warning: string | null }>('get_settings');
+      set({ settings: response.settings, error: response.recovery_warning });
     } catch (e) {
       set({ error: String(e) });
     }
@@ -249,7 +249,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
   saveSettings: async (settings) => {
     try {
       await invoke('save_settings', { settings });
-      set({ settings });
+      set({ settings, error: null });
     } catch (e) {
       set({ error: String(e) });
     }

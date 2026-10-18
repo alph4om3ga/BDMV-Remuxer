@@ -3,7 +3,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
-use std::io::ErrorKind;
+use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
 
 // ============================================================================
@@ -45,18 +45,56 @@ impl Default for Settings {
 impl Settings {
     const FILE_NAME: &'static str = "settings.json";
 
-    pub fn load_from_config_dir(config_dir: &Path) -> Result<Self, String> {
+    pub fn load_with_recovery(config_dir: &Path) -> SettingsLoadOutcome {
         let path = config_dir.join(Self::FILE_NAME);
         match fs::read(&path) {
-            Ok(contents) => serde_json::from_slice(&contents).map_err(|error| {
-                format!("Failed to parse settings at {}: {}", path.display(), error)
-            }),
-            Err(error) if error.kind() == ErrorKind::NotFound => Ok(Self::default()),
-            Err(error) => Err(format!(
-                "Failed to read settings at {}: {}",
-                path.display(),
-                error
-            )),
+            Ok(contents) => match serde_json::from_slice(&contents) {
+                Ok(settings) => SettingsLoadOutcome {
+                    settings,
+                    recovery_warning: None,
+                    can_save: true,
+                },
+                Err(parse_error) => match preserve_damaged_settings(config_dir, &contents) {
+                    Ok(backup_path) => SettingsLoadOutcome {
+                        settings: Self::default(),
+                        recovery_warning: Some(format!(
+                            "Saved preferences could not be loaded: {}. Defaults are active. \
+                             The damaged file was preserved at {}. Open Settings to restore \
+                             preferences manually or save new settings to reset them.",
+                            parse_error,
+                            backup_path.display()
+                        )),
+                        can_save: true,
+                    },
+                    Err(backup_error) => SettingsLoadOutcome {
+                        settings: Self::default(),
+                        recovery_warning: Some(format!(
+                            "Saved preferences could not be loaded: {}. A recovery copy could \
+                             not be created ({}), so saving settings is disabled to protect \
+                             the damaged file at {}.",
+                            parse_error,
+                            backup_error,
+                            path.display()
+                        )),
+                        can_save: false,
+                    },
+                },
+            },
+            Err(error) if error.kind() == ErrorKind::NotFound => SettingsLoadOutcome {
+                settings: Self::default(),
+                recovery_warning: None,
+                can_save: true,
+            },
+            Err(error) => SettingsLoadOutcome {
+                settings: Self::default(),
+                recovery_warning: Some(format!(
+                    "Saved preferences could not be read at {}: {}. Defaults are active; \
+                     saving is disabled to avoid replacing preferences that could not be read.",
+                    path.display(),
+                    error
+                )),
+                can_save: false,
+            },
         }
     }
 
@@ -74,6 +112,51 @@ impl Settings {
             .map_err(|error| format!("Failed to serialize settings: {}", error))?;
         fs::write(&path, contents)
             .map_err(|error| format!("Failed to write settings at {}: {}", path.display(), error))
+    }
+}
+
+pub struct SettingsLoadOutcome {
+    pub settings: Settings,
+    pub recovery_warning: Option<String>,
+    pub can_save: bool,
+}
+
+fn preserve_damaged_settings(config_dir: &Path, contents: &[u8]) -> Result<PathBuf, String> {
+    let settings_path = config_dir.join(Settings::FILE_NAME);
+    let mut backup_path = config_dir.join(format!("{}.corrupt", Settings::FILE_NAME));
+    let mut suffix = 1;
+    loop {
+        match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&backup_path)
+        {
+            Ok(mut backup_file) => {
+                if let Err(error) = backup_file.write_all(contents) {
+                    let _ = fs::remove_file(&backup_path);
+                    return Err(format!(
+                        "Failed to preserve damaged settings from {} to {}: {}",
+                        settings_path.display(),
+                        backup_path.display(),
+                        error
+                    ));
+                }
+                return Ok(backup_path);
+            }
+            Err(error) if error.kind() == ErrorKind::AlreadyExists => {
+                backup_path =
+                    config_dir.join(format!("{}.corrupt.{}", Settings::FILE_NAME, suffix));
+                suffix += 1;
+            }
+            Err(error) => {
+                return Err(format!(
+                    "Failed to preserve damaged settings from {} to {}: {}",
+                    settings_path.display(),
+                    backup_path.display(),
+                    error
+                ));
+            }
+        }
     }
 }
 
@@ -185,9 +268,30 @@ pub struct AppState {
     pub track_templates: HashMap<String, Vec<Track>>,
     persistence_path: Option<PathBuf>,
     persistence_error: Option<String>,
+    settings_recovery_warning: Option<String>,
+    settings_save_blocked: bool,
 }
 
 impl AppState {
+    pub fn set_settings_recovery(&mut self, warning: Option<String>, can_save: bool) {
+        self.settings_recovery_warning = warning;
+        self.settings_save_blocked = !can_save;
+    }
+
+    pub fn settings_recovery_warning(&self) -> Option<&str> {
+        self.settings_recovery_warning.as_deref()
+    }
+
+    pub fn ensure_settings_savable(&self) -> Result<(), String> {
+        if self.settings_save_blocked {
+            return Err(self.settings_recovery_warning.clone().unwrap_or_else(|| {
+                "Settings cannot be saved until the damaged preferences file is preserved."
+                    .to_string()
+            }));
+        }
+        Ok(())
+    }
+
     pub fn restore_workspace(&mut self, config_dir: &Path) -> Result<(), String> {
         let workspace = WorkspaceData::load(config_dir)?;
         self.current_volumes = workspace.current_volumes;
@@ -261,13 +365,93 @@ mod tests {
     #[test]
     fn missing_settings_file_uses_defaults() {
         let config_dir = temporary_config_dir();
-        let settings = Settings::load_from_config_dir(&config_dir).unwrap();
+        let settings = Settings::load_with_recovery(&config_dir);
 
-        assert_eq!(settings.mkvmerge_path, Settings::default().mkvmerge_path);
         assert_eq!(
-            settings.min_episode_duration,
+            settings.settings.mkvmerge_path,
+            Settings::default().mkvmerge_path
+        );
+        assert_eq!(
+            settings.settings.min_episode_duration,
             Settings::default().min_episode_duration
         );
+        assert!(settings.recovery_warning.is_none());
+        assert!(settings.can_save);
+    }
+
+    #[test]
+    fn malformed_settings_are_preserved_and_defaults_can_be_saved_as_a_reset() {
+        let config_dir = temporary_config_dir();
+        std::fs::create_dir_all(&config_dir).unwrap();
+        let settings_path = config_dir.join("settings.json");
+        let damaged_contents = "{ invalid json";
+        std::fs::write(&settings_path, damaged_contents).unwrap();
+
+        let outcome = Settings::load_with_recovery(&config_dir);
+        let warning = outcome.recovery_warning.as_deref().unwrap();
+        assert!(warning.contains("Saved preferences could not be loaded"));
+        assert!(warning.contains("settings.json.corrupt"));
+        assert!(outcome.can_save);
+        assert_eq!(
+            outcome.settings.mkvmerge_path,
+            Settings::default().mkvmerge_path
+        );
+        assert_eq!(
+            std::fs::read_to_string(&settings_path).unwrap(),
+            damaged_contents
+        );
+
+        let backup_path = config_dir.join("settings.json.corrupt");
+        assert_eq!(
+            std::fs::read_to_string(&backup_path).unwrap(),
+            damaged_contents
+        );
+
+        outcome.settings.save_to_config_dir(&config_dir).unwrap();
+        assert_ne!(
+            std::fs::read_to_string(&settings_path).unwrap(),
+            damaged_contents
+        );
+        assert_eq!(
+            std::fs::read_to_string(&backup_path).unwrap(),
+            damaged_contents
+        );
+
+        std::fs::remove_dir_all(config_dir).unwrap();
+    }
+
+    #[test]
+    fn malformed_settings_use_a_new_backup_name_without_replacing_an_existing_backup() {
+        let config_dir = temporary_config_dir();
+        std::fs::create_dir_all(&config_dir).unwrap();
+        std::fs::write(config_dir.join("settings.json"), "{ broken again").unwrap();
+        std::fs::write(config_dir.join("settings.json.corrupt"), "earlier recovery").unwrap();
+
+        let outcome = Settings::load_with_recovery(&config_dir);
+
+        assert!(outcome.can_save);
+        assert_eq!(
+            std::fs::read_to_string(config_dir.join("settings.json.corrupt")).unwrap(),
+            "earlier recovery"
+        );
+        assert_eq!(
+            std::fs::read_to_string(config_dir.join("settings.json.corrupt.1")).unwrap(),
+            "{ broken again"
+        );
+
+        std::fs::remove_dir_all(config_dir).unwrap();
+    }
+
+    #[test]
+    fn settings_saving_is_blocked_when_recovery_copy_could_not_be_made() {
+        let mut state = AppState::default();
+        state.set_settings_recovery(
+            Some("Could not preserve damaged preferences.".into()),
+            false,
+        );
+
+        let error = state.ensure_settings_savable().unwrap_err();
+        assert!(error.contains("Could not preserve damaged preferences"));
     }
 
     #[test]
@@ -281,7 +465,7 @@ mod tests {
         settings.episode_folder_name = "Episodes".into();
 
         settings.save_to_config_dir(&config_dir).unwrap();
-        let loaded = Settings::load_from_config_dir(&config_dir).unwrap();
+        let loaded = Settings::load_with_recovery(&config_dir).settings;
 
         assert_eq!(loaded.mkvmerge_path, settings.mkvmerge_path);
         assert_eq!(loaded.ffprobe_path, settings.ffprobe_path);

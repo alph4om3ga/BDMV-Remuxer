@@ -653,17 +653,28 @@ fn generate_output_filename(file: &MediaFile, show_name: &str) -> String {
 // ============================================================================
 
 #[tauri::command]
-async fn get_settings(state: State<'_, AppStateType>) -> Result<Settings, String> {
+async fn get_settings(state: State<'_, AppStateType>) -> Result<SettingsResponse, String> {
     let app_state = state.lock();
-    Ok(app_state.settings.clone())
+    Ok(SettingsResponse {
+        settings: app_state.settings.clone(),
+        recovery_warning: app_state.settings_recovery_warning().map(str::to_string),
+    })
+}
+
+#[derive(Serialize)]
+struct SettingsResponse {
+    settings: Settings,
+    recovery_warning: Option<String>,
 }
 
 #[tauri::command]
 async fn save_settings(settings: Settings, state: State<'_, AppStateType>) -> Result<(), String> {
     let mut app_state = state.lock();
+    app_state.ensure_settings_savable()?;
     let config_dir = settings_config_dir()?;
     settings.save_to_config_dir(&config_dir)?;
     app_state.settings = settings;
+    app_state.set_settings_recovery(None, true);
     Ok(())
 }
 
@@ -729,12 +740,14 @@ async fn get_media_info(path: String) -> Result<MediaFile, String> {
 fn main() {
     let config_dir =
         settings_config_dir().expect("could not determine the platform config directory");
-    let settings = Settings::load_from_config_dir(&config_dir).unwrap_or_else(|error| {
-        eprintln!("{}; using default settings", error);
-        Settings::default()
-    });
+    let settings_outcome = Settings::load_with_recovery(&config_dir);
+    if let Some(warning) = &settings_outcome.recovery_warning {
+        eprintln!("{}", warning);
+    }
     let mut restored_state = AppState::default();
-    restored_state.settings = settings;
+    restored_state.settings = settings_outcome.settings;
+    restored_state
+        .set_settings_recovery(settings_outcome.recovery_warning, settings_outcome.can_save);
     if let Err(error) = restored_state.restore_workspace(&config_dir) {
         eprintln!("{}", error);
         restored_state.set_persistence_error(error, &config_dir);
