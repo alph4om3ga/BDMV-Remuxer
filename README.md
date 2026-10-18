@@ -96,6 +96,17 @@ npm run tauri build
 
 The built application will be in `src-tauri/target/release/bundle/`.
 
+### Updating the application icon
+
+Edit `src-tauri/icons/icon.svg`, then run:
+
+```bash
+npm run icons:generate
+npm run icons:verify
+```
+
+The generator rasterizes the SVG master and uses the Tauri CLI to refresh the PNG, ICO, and ICNS files referenced by `src-tauri/tauri.conf.json`.
+
 ## Usage
 
 ### 1. Load BDMV Volumes

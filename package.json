@@ -7,6 +7,8 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
+    "icons:generate": "node scripts/generate-icons.mjs",
+    "icons:verify": "node scripts/verify-platform-icons.mjs",
     "tauri": "tauri"
   },
   "dependencies": {
@@ -14,6 +16,7 @@
     "lucide-react": "^0.344.0",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
+    "sharp": "^0.35.5",
     "zustand": "^4.5.1"
   },
   "devDependencies": {
