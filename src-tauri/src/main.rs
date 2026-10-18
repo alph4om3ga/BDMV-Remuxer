@@ -7,7 +7,9 @@ mod state;
 
 use crate::bdmv::{BdmvParser, MediaFile, Track, Volume};
 use crate::muxer::{MuxJob, MuxProgress, Muxer};
-use crate::state::{AppState, Project, ProjectStatus, Settings};
+use crate::state::{
+    settings_directory_for_config_root, AppState, Project, ProjectStatus, Settings,
+};
 use parking_lot::Mutex;
 use serde::Serialize;
 use std::collections::HashMap;
@@ -814,6 +816,6 @@ fn main() {
 
 fn settings_config_dir() -> Result<PathBuf, String> {
     tauri::api::path::config_dir()
-        .map(|path| path.join("bdmv-remuxer"))
+        .map(|path| settings_directory_for_config_root(&path))
         .ok_or_else(|| "could not determine the platform config directory".into())
 }

@@ -115,6 +115,10 @@ impl Settings {
     }
 }
 
+pub fn settings_directory_for_config_root(config_root: &Path) -> PathBuf {
+    config_root.join("bdmv-remuxer")
+}
+
 pub struct SettingsLoadOutcome {
     pub settings: Settings,
     pub recovery_warning: Option<String>,
@@ -343,7 +347,7 @@ impl AppState {
 
 #[cfg(test)]
 mod tests {
-    use super::{AppState, Project, ProjectStatus, Settings};
+    use super::{settings_directory_for_config_root, AppState, Project, ProjectStatus, Settings};
     use crate::bdmv::{Track, Volume};
     use chrono::Utc;
     use std::collections::HashMap;
@@ -360,6 +364,35 @@ mod tests {
             std::process::id(),
             timestamp
         ))
+    }
+
+    #[test]
+    fn settings_directory_uses_the_expected_app_folder_for_each_platform_root() {
+        let platform_roots = [
+            (
+                "Windows roaming config",
+                PathBuf::from("C:/Users/Alice/AppData/Roaming"),
+                PathBuf::from("C:/Users/Alice/AppData/Roaming/bdmv-remuxer"),
+            ),
+            (
+                "macOS Application Support",
+                PathBuf::from("/Users/alice/Library/Application Support"),
+                PathBuf::from("/Users/alice/Library/Application Support/bdmv-remuxer"),
+            ),
+            (
+                "Linux XDG config",
+                PathBuf::from("/home/alice/.config"),
+                PathBuf::from("/home/alice/.config/bdmv-remuxer"),
+            ),
+        ];
+
+        for (platform, config_root, expected) in platform_roots {
+            assert_eq!(
+                settings_directory_for_config_root(&config_root),
+                expected,
+                "unexpected settings directory for {platform}"
+            );
+        }
     }
 
     #[test]
@@ -455,23 +488,36 @@ mod tests {
     }
 
     #[test]
-    fn settings_round_trip_through_json_file() {
+    fn settings_survive_save_and_reload_after_restart() {
         let config_dir = temporary_config_dir();
         let mut settings = Settings::default();
         settings.mkvmerge_path = "/custom/bin/mkvmerge".into();
         settings.ffprobe_path = "/custom/bin/ffprobe".into();
         settings.min_episode_duration = 1800;
+        settings.min_extra_duration = 240;
+        settings.op_ed_min_duration = 75;
         settings.op_ed_max_duration = 125;
         settings.episode_folder_name = "Episodes".into();
+        settings.extra_folder_name = "Specials".into();
 
         settings.save_to_config_dir(&config_dir).unwrap();
-        let loaded = Settings::load_with_recovery(&config_dir).settings;
+        let first_load = Settings::load_with_recovery(&config_dir);
+        assert!(first_load.recovery_warning.is_none());
+        assert!(first_load.can_save);
+        assert_eq!(
+            serde_json::to_value(first_load.settings).unwrap(),
+            serde_json::to_value(&settings).unwrap()
+        );
 
-        assert_eq!(loaded.mkvmerge_path, settings.mkvmerge_path);
-        assert_eq!(loaded.ffprobe_path, settings.ffprobe_path);
-        assert_eq!(loaded.min_episode_duration, settings.min_episode_duration);
-        assert_eq!(loaded.op_ed_max_duration, settings.op_ed_max_duration);
-        assert_eq!(loaded.episode_folder_name, settings.episode_folder_name);
+        // A fresh load represents the next app launch; it must recover the same preferences
+        // from disk rather than relying on the first process's in-memory state.
+        let restarted_load = Settings::load_with_recovery(&config_dir);
+        assert!(restarted_load.recovery_warning.is_none());
+        assert!(restarted_load.can_save);
+        assert_eq!(
+            serde_json::to_value(restarted_load.settings).unwrap(),
+            serde_json::to_value(settings).unwrap()
+        );
 
         std::fs::remove_dir_all(config_dir).unwrap();
     }
