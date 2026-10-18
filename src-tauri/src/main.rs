@@ -26,28 +26,34 @@ type AppStateType = Arc<Mutex<AppState>>;
 #[tauri::command]
 async fn load_bdmv(path: String, state: State<'_, AppStateType>) -> Result<Volume, String> {
     let parser = BdmvParser::new();
-    let volume = parser.parse_volume(&path).await.map_err(|e| e.to_string())?;
-    
+    let volume = parser
+        .parse_volume(&path)
+        .await
+        .map_err(|e| e.to_string())?;
+
     // Store in state
     {
         let mut app_state = state.lock();
         app_state.current_volumes.push(volume.clone());
     }
-    
+
     Ok(volume)
 }
 
 #[tauri::command]
-async fn load_multiple_bdmvs(paths: Vec<String>, state: State<'_, AppStateType>) -> Result<Vec<Volume>, String> {
+async fn load_multiple_bdmvs(
+    paths: Vec<String>,
+    state: State<'_, AppStateType>,
+) -> Result<Vec<Volume>, String> {
     let parser = BdmvParser::new();
     let mut volumes = Vec::new();
-    
+
     for (index, path) in paths.iter().enumerate() {
         let mut volume = parser.parse_volume(path).await.map_err(|e| e.to_string())?;
         volume.volume_number = index + 1;
         volumes.push(volume);
     }
-    
+
     // Auto-assign episode numbers across volumes
     let mut episode_counter = 1;
     for volume in &mut volumes {
@@ -58,20 +64,23 @@ async fn load_multiple_bdmvs(paths: Vec<String>, state: State<'_, AppStateType>)
             }
         }
     }
-    
+
     // Store in state
     {
         let mut app_state = state.lock();
         app_state.current_volumes = volumes.clone();
     }
-    
+
     Ok(volumes)
 }
 
 #[tauri::command]
 async fn scan_for_volumes(base_path: String) -> Result<Vec<String>, String> {
     let parser = BdmvParser::new();
-    parser.find_bdmv_volumes(&base_path).await.map_err(|e| e.to_string())
+    parser
+        .find_bdmv_volumes(&base_path)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 // ============================================================================
@@ -86,7 +95,7 @@ async fn update_file_category(
     state: State<'_, AppStateType>,
 ) -> Result<(), String> {
     let mut app_state = state.lock();
-    
+
     for volume in &mut app_state.current_volumes {
         if volume.id == volume_id {
             for file in &mut volume.files {
@@ -97,7 +106,7 @@ async fn update_file_category(
             }
         }
     }
-    
+
     Err("File not found".into())
 }
 
@@ -109,7 +118,7 @@ async fn update_file_number(
     state: State<'_, AppStateType>,
 ) -> Result<(), String> {
     let mut app_state = state.lock();
-    
+
     for volume in &mut app_state.current_volumes {
         if volume.id == volume_id {
             for file in &mut volume.files {
@@ -126,7 +135,7 @@ async fn update_file_number(
             }
         }
     }
-    
+
     Err("File not found".into())
 }
 
@@ -137,7 +146,7 @@ async fn reorder_files(
     state: State<'_, AppStateType>,
 ) -> Result<(), String> {
     let mut app_state = state.lock();
-    
+
     for volume in &mut app_state.current_volumes {
         if volume.id == volume_id {
             let mut reordered: Vec<MediaFile> = Vec::new();
@@ -150,7 +159,7 @@ async fn reorder_files(
             return Ok(());
         }
     }
-    
+
     Err("Volume not found".into())
 }
 
@@ -168,7 +177,7 @@ async fn update_track(
     state: State<'_, AppStateType>,
 ) -> Result<(), String> {
     let mut app_state = state.lock();
-    
+
     for volume in &mut app_state.current_volumes {
         if volume.id == volume_id {
             for file in &mut volume.files {
@@ -188,7 +197,7 @@ async fn update_track(
             }
         }
     }
-    
+
     Err("Track not found".into())
 }
 
@@ -201,14 +210,16 @@ async fn apply_track_template(
 ) -> Result<i32, String> {
     let mut app_state = state.lock();
     let mut applied_count = 0;
-    
+
     for volume in &mut app_state.current_volumes {
         if volume.id == volume_id || volume_id == "all" {
             for file in &mut volume.files {
                 if file.category == category {
                     // Apply template - match by track type and index
                     for (idx, template_track) in template.iter().enumerate() {
-                        if idx < file.tracks.len() && file.tracks[idx].track_type == template_track.track_type {
+                        if idx < file.tracks.len()
+                            && file.tracks[idx].track_type == template_track.track_type
+                        {
                             file.tracks[idx].language = template_track.language.clone();
                             file.tracks[idx].name = template_track.name.clone();
                         }
@@ -218,7 +229,7 @@ async fn apply_track_template(
             }
         }
     }
-    
+
     Ok(applied_count)
 }
 
@@ -230,7 +241,7 @@ async fn detect_track_mismatches(
 ) -> Result<Vec<MediaFile>, String> {
     let app_state = state.lock();
     let mut mismatches = Vec::new();
-    
+
     for volume in &app_state.current_volumes {
         for file in &volume.files {
             if file.category == category && file.tracks.len() != expected_track_count {
@@ -238,7 +249,7 @@ async fn detect_track_mismatches(
             }
         }
     }
-    
+
     Ok(mismatches)
 }
 
@@ -253,7 +264,7 @@ async fn create_project(
     state: State<'_, AppStateType>,
 ) -> Result<Project, String> {
     let mut app_state = state.lock();
-    
+
     let project = Project {
         id: Uuid::new_v4().to_string(),
         output_name,
@@ -266,7 +277,7 @@ async fn create_project(
         created_at: chrono::Utc::now(),
         error: None,
     };
-    
+
     app_state.queue.push(project.clone());
     Ok(project)
 }
@@ -285,16 +296,19 @@ async fn get_queue(state: State<'_, AppStateType>) -> Result<Vec<Project>, Strin
 }
 
 #[tauri::command]
-async fn reorder_queue(project_ids: Vec<String>, state: State<'_, AppStateType>) -> Result<(), String> {
+async fn reorder_queue(
+    project_ids: Vec<String>,
+    state: State<'_, AppStateType>,
+) -> Result<(), String> {
     let mut app_state = state.lock();
     let mut reordered: Vec<Project> = Vec::new();
-    
+
     for id in &project_ids {
         if let Some(project) = app_state.queue.iter().find(|p| &p.id == id) {
             reordered.push(project.clone());
         }
     }
-    
+
     app_state.queue = reordered;
     Ok(())
 }
@@ -310,23 +324,23 @@ async fn start_muxing(
     muxer_state: State<'_, Arc<Mutex<Muxer>>>,
 ) -> Result<(), String> {
     let mut muxer = muxer_state.lock();
-    
+
     if muxer.is_running {
         return Err("Muxer is already running".into());
     }
-    
+
     muxer.is_running = true;
     muxer.is_paused = false;
-    
+
     // Clone what we need for the async task
     let state_clone = state.inner().clone();
     let muxer_clone = muxer_state.inner().clone();
-    
+
     // Spawn the muxing task
     tauri::async_runtime::spawn(async move {
         run_mux_queue(window, state_clone, muxer_clone).await;
     });
-    
+
     Ok(())
 }
 
@@ -353,7 +367,9 @@ async fn stop_muxing(muxer_state: State<'_, Arc<Mutex<Muxer>>>) -> Result<(), St
 }
 
 #[tauri::command]
-async fn get_muxer_status(muxer_state: State<'_, Arc<Mutex<Muxer>>>) -> Result<MuxerStatus, String> {
+async fn get_muxer_status(
+    muxer_state: State<'_, Arc<Mutex<Muxer>>>,
+) -> Result<MuxerStatus, String> {
     let muxer = muxer_state.lock();
     Ok(MuxerStatus {
         is_running: muxer.is_running,
@@ -381,15 +397,17 @@ async fn run_mux_queue(window: Window, state: AppStateType, muxer_state: Arc<Mut
             tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
             continue;
         }
-        
+
         // Get next pending project
         let project = {
             let mut app_state = state.lock();
-            app_state.queue.iter_mut()
+            app_state
+                .queue
+                .iter_mut()
                 .find(|p| matches!(p.status, ProjectStatus::Pending | ProjectStatus::Processing))
                 .cloned()
         };
-        
+
         match project {
             Some(mut project) => {
                 // Update status to processing
@@ -399,24 +417,27 @@ async fn run_mux_queue(window: Window, state: AppStateType, muxer_state: Arc<Mut
                         p.status = ProjectStatus::Processing;
                     }
                 }
-                
+
                 // Emit progress event
-                let _ = window.emit("mux-progress", MuxProgress {
-                    project_id: project.id.clone(),
-                    progress: 0.0,
-                    current_file: None,
-                    status: "processing".into(),
-                });
-                
+                let _ = window.emit(
+                    "mux-progress",
+                    MuxProgress {
+                        project_id: project.id.clone(),
+                        progress: 0.0,
+                        current_file: None,
+                        status: "processing".into(),
+                    },
+                );
+
                 // Process each volume
                 let settings = {
                     let app_state = state.lock();
                     app_state.settings.clone()
                 };
-                
+
                 let total_files: usize = project.volumes.iter().map(|v| v.files.len()).sum();
                 let mut processed_files = 0;
-                
+
                 for volume in &project.volumes {
                     for file in &volume.files {
                         // Check pause/stop — drop guard before every await
@@ -433,42 +454,46 @@ async fn run_mux_queue(window: Window, state: AppStateType, muxer_state: Arc<Mut
                             }
                             tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
                         }
-                        
+
                         // Determine output path
                         let subfolder = match file.category.as_str() {
                             "EPISODE" => "Episode",
                             _ => "Extra",
                         };
-                        
+
                         let output_filename = generate_output_filename(file, &project.output_name);
                         let output_dir = PathBuf::from(&project.output_path)
                             .join(&project.output_name)
                             .join(subfolder);
-                        
+
                         // Create output directory
                         if let Err(e) = tokio::fs::create_dir_all(&output_dir).await {
                             eprintln!("Failed to create output directory: {}", e);
                             continue;
                         }
-                        
+
                         let output_path = output_dir.join(&output_filename);
-                        
+
                         // Update current file
                         {
                             let mut app_state = state.lock();
-                            if let Some(p) = app_state.queue.iter_mut().find(|p| p.id == project.id) {
+                            if let Some(p) = app_state.queue.iter_mut().find(|p| p.id == project.id)
+                            {
                                 p.current_file = Some(file.filename.clone());
                             }
                         }
-                        
+
                         // Emit progress
-                        let _ = window.emit("mux-progress", MuxProgress {
-                            project_id: project.id.clone(),
-                            progress: (processed_files as f64 / total_files as f64) * 100.0,
-                            current_file: Some(file.filename.clone()),
-                            status: "processing".into(),
-                        });
-                        
+                        let _ = window.emit(
+                            "mux-progress",
+                            MuxProgress {
+                                project_id: project.id.clone(),
+                                progress: (processed_files as f64 / total_files as f64) * 100.0,
+                                current_file: Some(file.filename.clone()),
+                                status: "processing".into(),
+                            },
+                        );
+
                         // Run mkvmerge
                         let job = MuxJob {
                             input_path: file.path.clone(),
@@ -476,15 +501,15 @@ async fn run_mux_queue(window: Window, state: AppStateType, muxer_state: Arc<Mut
                             chapter_path: file.chapter_file.clone(),
                             tracks: file.tracks.clone(),
                         };
-                        
+
                         if let Err(e) = Muxer::run_mkvmerge(&settings.mkvmerge_path, &job).await {
                             eprintln!("Muxing failed for {}: {}", file.filename, e);
                         }
-                        
+
                         processed_files += 1;
                     }
                 }
-                
+
                 // Mark project as complete
                 {
                     let mut app_state = state.lock();
@@ -493,13 +518,16 @@ async fn run_mux_queue(window: Window, state: AppStateType, muxer_state: Arc<Mut
                         p.progress = 100.0;
                     }
                 }
-                
-                let _ = window.emit("mux-progress", MuxProgress {
-                    project_id: project.id.clone(),
-                    progress: 100.0,
-                    current_file: None,
-                    status: "complete".into(),
-                });
+
+                let _ = window.emit(
+                    "mux-progress",
+                    MuxProgress {
+                        project_id: project.id.clone(),
+                        progress: 100.0,
+                        current_file: None,
+                        status: "complete".into(),
+                    },
+                );
             }
             None => {
                 // No more projects, stop muxing
@@ -509,7 +537,7 @@ async fn run_mux_queue(window: Window, state: AppStateType, muxer_state: Arc<Mut
             }
         }
     }
-    
+
     let _ = window.emit("mux-complete", ());
 }
 
@@ -550,6 +578,8 @@ async fn get_settings(state: State<'_, AppStateType>) -> Result<Settings, String
 #[tauri::command]
 async fn save_settings(settings: Settings, state: State<'_, AppStateType>) -> Result<(), String> {
     let mut app_state = state.lock();
+    let config_dir = settings_config_dir()?;
+    settings.save_to_config_dir(&config_dir)?;
     app_state.settings = settings;
     Ok(())
 }
@@ -566,7 +596,9 @@ async fn save_track_template(
 }
 
 #[tauri::command]
-async fn get_track_templates(state: State<'_, AppStateType>) -> Result<HashMap<String, Vec<Track>>, String> {
+async fn get_track_templates(
+    state: State<'_, AppStateType>,
+) -> Result<HashMap<String, Vec<Track>>, String> {
     let app_state = state.lock();
     Ok(app_state.track_templates.clone())
 }
@@ -578,16 +610,20 @@ async fn get_track_templates(state: State<'_, AppStateType>) -> Result<HashMap<S
 #[tauri::command]
 async fn verify_mkvmerge(path: String) -> Result<String, String> {
     use tokio::process::Command;
-    
+
     let output = Command::new(&path)
         .arg("--version")
         .output()
         .await
         .map_err(|e| format!("Failed to run mkvmerge: {}", e))?;
-    
+
     if output.status.success() {
         let version = String::from_utf8_lossy(&output.stdout);
-        Ok(version.lines().next().unwrap_or("Unknown version").to_string())
+        Ok(version
+            .lines()
+            .next()
+            .unwrap_or("Unknown version")
+            .to_string())
     } else {
         Err("mkvmerge returned an error".into())
     }
@@ -596,7 +632,10 @@ async fn verify_mkvmerge(path: String) -> Result<String, String> {
 #[tauri::command]
 async fn get_media_info(path: String) -> Result<MediaFile, String> {
     let parser = BdmvParser::new();
-    parser.get_media_info(&path).await.map_err(|e| e.to_string())
+    parser
+        .get_media_info(&path)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 // ============================================================================
@@ -604,9 +643,18 @@ async fn get_media_info(path: String) -> Result<MediaFile, String> {
 // ============================================================================
 
 fn main() {
-    let app_state: AppStateType = Arc::new(Mutex::new(AppState::default()));
+    let config_dir =
+        settings_config_dir().expect("could not determine the platform config directory");
+    let settings = Settings::load_from_config_dir(&config_dir).unwrap_or_else(|error| {
+        eprintln!("{}; using default settings", error);
+        Settings::default()
+    });
+    let app_state: AppStateType = Arc::new(Mutex::new(AppState {
+        settings,
+        ..AppState::default()
+    }));
     let muxer_state: Arc<Mutex<Muxer>> = Arc::new(Mutex::new(Muxer::default()));
-    
+
     tauri::Builder::default()
         .manage(app_state)
         .manage(muxer_state)
@@ -645,4 +693,10 @@ fn main() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+fn settings_config_dir() -> Result<PathBuf, String> {
+    tauri::api::path::config_dir()
+        .map(|path| path.join("bdmv-remuxer"))
+        .ok_or_else(|| "could not determine the platform config directory".into())
 }
