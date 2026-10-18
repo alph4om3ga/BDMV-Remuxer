@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 import { invoke } from '@tauri-apps/api/tauri';
-import { open } from '@tauri-apps/api/dialog';
+import { confirm, open } from '@tauri-apps/api/dialog';
 import { listen } from '@tauri-apps/api/event';
 import type { Volume, Project, Settings, Track, FileCategory } from './types';
 
@@ -33,7 +33,7 @@ interface AppStore {
   // Actions
   loadBdmv: () => Promise<void>;
   loadMultipleBdmvs: () => Promise<void>;
-  clearVolumes: () => void;
+  clearVolumes: () => Promise<void>;
   selectFile: (fileId: string) => void;
   toggleVolumeExpanded: (volumeId: string) => void;
   updateFileCategory: (volumeId: string, fileId: string, category: FileCategory) => Promise<void>;
@@ -47,6 +47,7 @@ interface AppStore {
   loadSettings: () => Promise<void>;
   saveSettings: (settings: Settings) => Promise<void>;
   loadQueue: () => Promise<void>;
+  loadCurrentVolumes: () => Promise<void>;
   loadTrackTemplates: () => Promise<void>;
   saveTrackTemplate: (category: FileCategory, template: Track[]) => Promise<void>;
   setOutputName: (name: string) => void;
@@ -113,8 +114,13 @@ export const useAppStore = create<AppStore>((set, get) => ({
     }
   },
 
-  clearVolumes: () => {
-    set({ volumes: [], selectedFileId: null, expandedVolumes: {} });
+  clearVolumes: async () => {
+    try {
+      await invoke('clear_volumes');
+      set({ volumes: [], selectedFileId: null, expandedVolumes: {} });
+    } catch (e) {
+      set({ error: String(e) });
+    }
   },
 
   selectFile: (fileId) => set({ selectedFileId: fileId }),
@@ -258,6 +264,17 @@ export const useAppStore = create<AppStore>((set, get) => ({
     }
   },
 
+  loadCurrentVolumes: async () => {
+    try {
+      const volumes = await invoke<Volume[]>('get_current_volumes');
+      const expandedVolumes: Record<string, boolean> = {};
+      volumes.forEach(volume => { expandedVolumes[volume.id] = true; });
+      set({ volumes, expandedVolumes });
+    } catch (e) {
+      set({ error: String(e) });
+    }
+  },
+
   loadTrackTemplates: async () => {
     try {
       const trackTemplates = await invoke<Record<string, Track[]>>('get_track_templates');
@@ -311,6 +328,23 @@ export const useAppStore = create<AppStore>((set, get) => ({
 
     listen('mux-complete', () => {
       set({ muxerStatus: { is_running: false, is_paused: false } });
+    });
+
+    listen<string>('app-error', ({ payload }) => {
+      set({ error: payload });
+    });
+
+    listen('mux-close-requested', async () => {
+      const shouldClose = await confirm(
+        'Muxing is still in progress. Close the app? Incomplete projects will be saved as Paused.',
+        { title: 'Muxing in progress', type: 'warning' },
+      );
+      if (!shouldClose) return;
+      try {
+        await invoke('confirm_close');
+      } catch (e) {
+        set({ error: String(e) });
+      }
     });
   },
 }));

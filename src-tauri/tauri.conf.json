@@ -14,7 +14,8 @@
       "all": false,
       "dialog": {
         "open": true,
-        "save": true
+        "save": true,
+        "confirm": true
       },
       "fs": {
         "all": true,

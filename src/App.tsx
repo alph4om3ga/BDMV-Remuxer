@@ -601,6 +601,7 @@ const App: React.FC = () => {
     stopMuxing,
     loadSettings,
     loadQueue,
+    loadCurrentVolumes,
     loadTrackTemplates,
     setOutputName,
     selectOutputPath,
@@ -615,6 +616,7 @@ const App: React.FC = () => {
   useEffect(() => {
     loadSettings();
     loadQueue();
+    loadCurrentVolumes();
     loadTrackTemplates();
     setupEventListeners();
   }, []);

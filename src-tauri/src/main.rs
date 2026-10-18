@@ -9,9 +9,10 @@ use crate::bdmv::{BdmvParser, MediaFile, Track, Volume};
 use crate::muxer::{MuxJob, MuxProgress, Muxer};
 use crate::state::{AppState, Project, ProjectStatus, Settings};
 use parking_lot::Mutex;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tauri::{Manager, State, Window};
 use uuid::Uuid;
@@ -35,6 +36,7 @@ async fn load_bdmv(path: String, state: State<'_, AppStateType>) -> Result<Volum
     {
         let mut app_state = state.lock();
         app_state.current_volumes.push(volume.clone());
+        app_state.persist_workspace()?;
     }
 
     Ok(volume)
@@ -69,6 +71,7 @@ async fn load_multiple_bdmvs(
     {
         let mut app_state = state.lock();
         app_state.current_volumes = volumes.clone();
+        app_state.persist_workspace()?;
     }
 
     Ok(volumes)
@@ -101,6 +104,7 @@ async fn update_file_category(
             for file in &mut volume.files {
                 if file.id == file_id {
                     file.category = category;
+                    app_state.persist_workspace()?;
                     return Ok(());
                 }
             }
@@ -130,6 +134,7 @@ async fn update_file_number(
                         "SPECIAL" => file.special_number = Some(number),
                         _ => {}
                     }
+                    app_state.persist_workspace()?;
                     return Ok(());
                 }
             }
@@ -156,6 +161,7 @@ async fn reorder_files(
                 }
             }
             volume.files = reordered;
+            app_state.persist_workspace()?;
             return Ok(());
         }
     }
@@ -190,6 +196,7 @@ async fn update_track(
                             if let Some(n) = name {
                                 track.name = n;
                             }
+                            app_state.persist_workspace()?;
                             return Ok(());
                         }
                     }
@@ -230,6 +237,7 @@ async fn apply_track_template(
         }
     }
 
+    app_state.persist_workspace()?;
     Ok(applied_count)
 }
 
@@ -279,6 +287,7 @@ async fn create_project(
     };
 
     app_state.queue.push(project.clone());
+    app_state.persist_workspace()?;
     Ok(project)
 }
 
@@ -286,13 +295,29 @@ async fn create_project(
 async fn remove_project(project_id: String, state: State<'_, AppStateType>) -> Result<(), String> {
     let mut app_state = state.lock();
     app_state.queue.retain(|p| p.id != project_id);
+    app_state.persist_workspace()?;
     Ok(())
 }
 
 #[tauri::command]
 async fn get_queue(state: State<'_, AppStateType>) -> Result<Vec<Project>, String> {
     let app_state = state.lock();
+    app_state.ensure_workspace_available()?;
     Ok(app_state.queue.clone())
+}
+
+#[tauri::command]
+async fn get_current_volumes(state: State<'_, AppStateType>) -> Result<Vec<Volume>, String> {
+    let app_state = state.lock();
+    app_state.ensure_workspace_available()?;
+    Ok(app_state.current_volumes.clone())
+}
+
+#[tauri::command]
+async fn clear_volumes(state: State<'_, AppStateType>) -> Result<(), String> {
+    let mut app_state = state.lock();
+    app_state.current_volumes.clear();
+    app_state.persist_workspace()
 }
 
 #[tauri::command]
@@ -310,6 +335,7 @@ async fn reorder_queue(
     }
 
     app_state.queue = reordered;
+    app_state.persist_workspace()?;
     Ok(())
 }
 
@@ -329,6 +355,16 @@ async fn start_muxing(
         return Err("Muxer is already running".into());
     }
 
+    {
+        let mut app_state = state.lock();
+        for project in &mut app_state.queue {
+            if project.status == ProjectStatus::Paused {
+                project.status = ProjectStatus::Pending;
+            }
+        }
+        app_state.persist_workspace()?;
+    }
+
     muxer.is_running = true;
     muxer.is_paused = false;
 
@@ -342,6 +378,37 @@ async fn start_muxing(
     });
 
     Ok(())
+}
+
+#[tauri::command]
+async fn confirm_close(
+    window: Window,
+    state: State<'_, AppStateType>,
+    muxer_state: State<'_, Arc<Mutex<Muxer>>>,
+    close_approval: State<'_, Arc<AtomicBool>>,
+) -> Result<(), String> {
+    {
+        let mut muxer = muxer_state.lock();
+        muxer.is_running = false;
+        muxer.is_paused = false;
+    }
+    {
+        let mut app_state = state.lock();
+        for project in &mut app_state.queue {
+            if matches!(
+                project.status,
+                ProjectStatus::Pending | ProjectStatus::Processing
+            ) {
+                project.status = ProjectStatus::Paused;
+            }
+        }
+        app_state.persist_workspace()?;
+    }
+
+    close_approval.store(true, Ordering::SeqCst);
+    window
+        .close()
+        .map_err(|error| format!("Failed to close window: {}", error))
 }
 
 #[tauri::command]
@@ -409,13 +476,14 @@ async fn run_mux_queue(window: Window, state: AppStateType, muxer_state: Arc<Mut
         };
 
         match project {
-            Some(mut project) => {
+            Some(project) => {
                 // Update status to processing
                 {
                     let mut app_state = state.lock();
                     if let Some(p) = app_state.queue.iter_mut().find(|p| p.id == project.id) {
                         p.status = ProjectStatus::Processing;
                     }
+                    persist_from_mux(&window, &app_state);
                 }
 
                 // Emit progress event
@@ -480,7 +548,13 @@ async fn run_mux_queue(window: Window, state: AppStateType, muxer_state: Arc<Mut
                             if let Some(p) = app_state.queue.iter_mut().find(|p| p.id == project.id)
                             {
                                 p.current_file = Some(file.filename.clone());
+                                p.progress = if total_files == 0 {
+                                    0.0
+                                } else {
+                                    (processed_files as f64 / total_files as f64) * 100.0
+                                };
                             }
+                            persist_from_mux(&window, &app_state);
                         }
 
                         // Emit progress
@@ -516,7 +590,9 @@ async fn run_mux_queue(window: Window, state: AppStateType, muxer_state: Arc<Mut
                     if let Some(p) = app_state.queue.iter_mut().find(|p| p.id == project.id) {
                         p.status = ProjectStatus::Complete;
                         p.progress = 100.0;
+                        p.current_file = None;
                     }
+                    persist_from_mux(&window, &app_state);
                 }
 
                 let _ = window.emit(
@@ -539,6 +615,13 @@ async fn run_mux_queue(window: Window, state: AppStateType, muxer_state: Arc<Mut
     }
 
     let _ = window.emit("mux-complete", ());
+}
+
+fn persist_from_mux(window: &Window, app_state: &AppState) {
+    if let Err(error) = app_state.persist_workspace() {
+        eprintln!("{}", error);
+        let _ = window.emit("app-error", error);
+    }
 }
 
 fn generate_output_filename(file: &MediaFile, show_name: &str) -> String {
@@ -592,7 +675,7 @@ async fn save_track_template(
 ) -> Result<(), String> {
     let mut app_state = state.lock();
     app_state.track_templates.insert(category, template);
-    Ok(())
+    app_state.persist_workspace()
 }
 
 #[tauri::command]
@@ -600,6 +683,7 @@ async fn get_track_templates(
     state: State<'_, AppStateType>,
 ) -> Result<HashMap<String, Vec<Track>>, String> {
     let app_state = state.lock();
+    app_state.ensure_workspace_available()?;
     Ok(app_state.track_templates.clone())
 }
 
@@ -649,15 +733,20 @@ fn main() {
         eprintln!("{}; using default settings", error);
         Settings::default()
     });
-    let app_state: AppStateType = Arc::new(Mutex::new(AppState {
-        settings,
-        ..AppState::default()
-    }));
+    let mut restored_state = AppState::default();
+    restored_state.settings = settings;
+    if let Err(error) = restored_state.restore_workspace(&config_dir) {
+        eprintln!("{}", error);
+        restored_state.set_persistence_error(error, &config_dir);
+    }
+    let app_state: AppStateType = Arc::new(Mutex::new(restored_state));
     let muxer_state: Arc<Mutex<Muxer>> = Arc::new(Mutex::new(Muxer::default()));
+    let close_approval = Arc::new(AtomicBool::new(false));
 
     tauri::Builder::default()
         .manage(app_state)
         .manage(muxer_state)
+        .manage(close_approval.clone())
         .invoke_handler(tauri::generate_handler![
             // BDMV Loading
             load_bdmv,
@@ -675,6 +764,8 @@ fn main() {
             create_project,
             remove_project,
             get_queue,
+            get_current_volumes,
+            clear_volumes,
             reorder_queue,
             // Muxing
             start_muxing,
@@ -682,6 +773,7 @@ fn main() {
             resume_muxing,
             stop_muxing,
             get_muxer_status,
+            confirm_close,
             // Settings
             get_settings,
             save_settings,
@@ -691,6 +783,18 @@ fn main() {
             verify_mkvmerge,
             get_media_info,
         ])
+        .on_window_event(move |event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event.event() {
+                if close_approval.swap(false, Ordering::SeqCst) {
+                    return;
+                }
+                let muxer_state = event.window().state::<Arc<Mutex<Muxer>>>();
+                if muxer_state.lock().is_running {
+                    api.prevent_close();
+                    let _ = event.window().emit("mux-close-requested", ());
+                }
+            }
+        })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
