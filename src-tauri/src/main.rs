@@ -369,16 +369,17 @@ struct MuxerStatus {
 
 async fn run_mux_queue(window: Window, state: AppStateType, muxer_state: Arc<Mutex<Muxer>>) {
     loop {
-        // Check if we should stop
-        {
+        // Check if we should stop or wait (drop guard before any await)
+        let (is_running, is_paused) = {
             let muxer = muxer_state.lock();
-            if !muxer.is_running {
-                break;
-            }
-            if muxer.is_paused {
-                tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-                continue;
-            }
+            (muxer.is_running, muxer.is_paused)
+        };
+        if !is_running {
+            break;
+        }
+        if is_paused {
+            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+            continue;
         }
         
         // Get next pending project
@@ -418,20 +419,19 @@ async fn run_mux_queue(window: Window, state: AppStateType, muxer_state: Arc<Mut
                 
                 for volume in &project.volumes {
                     for file in &volume.files {
-                        // Check pause/stop
-                        {
-                            let muxer = muxer_state.lock();
-                            if !muxer.is_running {
+                        // Check pause/stop — drop guard before every await
+                        loop {
+                            let (is_running, is_paused) = {
+                                let muxer = muxer_state.lock();
+                                (muxer.is_running, muxer.is_paused)
+                            };
+                            if !is_running {
                                 return;
                             }
-                            while muxer.is_paused {
-                                drop(muxer);
-                                tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-                                let muxer = muxer_state.lock();
-                                if !muxer.is_running {
-                                    return;
-                                }
+                            if !is_paused {
+                                break;
                             }
+                            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
                         }
                         
                         // Determine output path
