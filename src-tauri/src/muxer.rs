@@ -3,7 +3,7 @@ use crate::tool_error::format_tool_launch_error;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 use tokio::process::Command;
 
 // ============================================================================
@@ -156,6 +156,13 @@ impl Muxer {
             )
         })?;
 
+        let stderr = child.stderr.take().expect("stderr was piped");
+        let stderr_task = tokio::spawn(async move {
+            let mut bytes = Vec::new();
+            let mut stderr = stderr;
+            stderr.read_to_end(&mut bytes).await.map(|_| bytes)
+        });
+
         if let Some(stdout) = child.stdout.take() {
             let mut reader = BufReader::new(stdout).lines();
             while let Ok(Some(line)) = reader.next_line().await {
@@ -171,13 +178,27 @@ impl Muxer {
             .wait()
             .await
             .map_err(|e| format!("mkvmerge wait error: {}", e))?;
+        let stderr = stderr_task
+            .await
+            .map_err(|error| format!("mkvmerge stderr reader failed: {}", error))?
+            .map_err(|error| format!("Could not read mkvmerge diagnostics: {}", error))?;
+        let stderr = String::from_utf8_lossy(&stderr);
 
         if status.success() || status.code() == Some(1) {
             // mkvmerge returns 1 for warnings, which is still a success.
             promote_staged_output(&staged_output_path, final_output_path).await
         } else {
             let _ = tokio::fs::remove_file(&staged_output_path).await;
-            Err(format!("mkvmerge exited with code {:?}", status.code()))
+            let diagnostics = stderr.trim();
+            if diagnostics.is_empty() {
+                Err(format!("mkvmerge exited with code {:?}", status.code()))
+            } else {
+                Err(format!(
+                    "mkvmerge exited with code {:?}: {}",
+                    status.code(),
+                    diagnostics
+                ))
+            }
         }
     }
 }
@@ -298,7 +319,7 @@ mod tests {
         let tool_path = test_dir.join("fake-mkvmerge");
         fs::write(
             &tool_path,
-            "#!/bin/sh\nwhile [ \"$#\" -gt 0 ]; do\n  if [ \"$1\" = \"-o\" ]; then shift; out=\"$1\"; fi\n  shift\ndone\nprintf 'partial output' > \"$out\"\nexit 2\n",
+            "#!/bin/sh\nwhile [ \"$#\" -gt 0 ]; do\n  if [ \"$1\" = \"-o\" ]; then shift; out=\"$1\"; fi\n  shift\ndone\nprintf 'partial output' > \"$out\"\necho 'fixture media could not be read' >&2\nexit 2\n",
         )
         .unwrap();
         fs::set_permissions(&tool_path, fs::Permissions::from_mode(0o755)).unwrap();
@@ -313,9 +334,10 @@ mod tests {
             tracks: Vec::<Track>::new(),
         };
 
-        assert!(Muxer::run_mkvmerge(&tool_path.to_string_lossy(), &job)
+        let error = Muxer::run_mkvmerge(&tool_path.to_string_lossy(), &job)
             .await
-            .is_err());
+            .unwrap_err();
+        assert!(error.contains("fixture media could not be read"), "{error}");
         assert_eq!(fs::read_to_string(&final_path).unwrap(), "previous output");
         assert!(!staged_path.exists());
 

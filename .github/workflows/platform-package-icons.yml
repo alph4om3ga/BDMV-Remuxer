@@ -177,6 +177,45 @@ jobs:
             }
           }
 
+      - name: Install MKVToolNix for the packaged remux check
+        run: choco install mkvtoolnix --no-progress --yes
+      - name: Run a remux with the installed Windows application
+        shell: pwsh
+        run: |
+          $exe = Join-Path $env:RUNNER_TEMP "bdmv remuxer installed\bdmv-remuxer.exe"
+          $mkvmerge = (Get-Command mkvmerge.exe -ErrorAction Stop).Source
+          $fixture = Join-Path $env:GITHUB_WORKSPACE "src-tauri\tests\fixtures\remux-smoke-input.mkv"
+          $output = Join-Path $env:RUNNER_TEMP "bdmv-remuxer-smoke-output.mkv"
+          $report = Join-Path $env:RUNNER_TEMP "bdmv-remuxer-smoke.log"
+
+          if (-not (Test-Path $exe)) { throw "The installed application executable is missing: $exe" }
+          if (-not (Test-Path $fixture)) { throw "The remux smoke fixture is missing: $fixture" }
+          Remove-Item $output, $report -Force -ErrorAction SilentlyContinue
+          & $exe --smoke-remux $mkvmerge $fixture $output $report
+          $smokeExitCode = $LASTEXITCODE
+          if (Test-Path $report) { Get-Content $report | Write-Host }
+          if ($smokeExitCode -ne 0) {
+            throw "The installed app's remux smoke failed with exit code $smokeExitCode."
+          }
+          if (-not (Test-Path $output) -or (Get-Item $output).Length -eq 0) {
+            throw "The installed app did not produce a non-empty remux output."
+          }
+
+          $probeLog = Join-Path $env:RUNNER_TEMP "bdmv-remuxer-smoke-probe.log"
+          $probeJson = & $mkvmerge -J $output 2>&1
+          $probeExitCode = $LASTEXITCODE
+          $probeJson | Set-Content $probeLog
+          if ($probeExitCode -ne 0) {
+            Get-Content $probeLog | Write-Host
+            throw "mkvmerge could not inspect the remux output (exit code $probeExitCode)."
+          }
+          $probe = (Get-Content $probeLog -Raw) | ConvertFrom-Json
+          if ($probe.container.type -notmatch "Matroska" -or $probe.tracks.Count -lt 1) {
+            Get-Content $probeLog | Write-Host
+            throw "The remux output is not a Matroska file with at least one track."
+          }
+          Write-Host "Verified installed-app remux output: $($probe.tracks.Count) track(s), $((Get-Item $output).Length) bytes."
+
   macos:
     name: macOS DMG mount and app launch
     runs-on: macos-latest
@@ -278,3 +317,46 @@ jobs:
           fi
 
           echo "The app launched from the mounted DMG and rendered its main interface."
+      - name: Install MKVToolNix for the packaged remux check
+        run: brew install mkvtoolnix
+      - name: Run a remux with the app bundled in the mounted DMG
+        shell: bash
+        run: |
+          set -euo pipefail
+          dmg="$(find src-tauri/target/release/bundle/dmg -maxdepth 1 -type f -name '*.dmg' -print -quit)"
+          mount_point="$RUNNER_TEMP/bdmv-remuxer-remux-dmg"
+          mkdir -p "$mount_point"
+          hdiutil attach -nobrowse -readonly -mountpoint "$mount_point" "$dmg" >/dev/null
+          cleanup() {
+            hdiutil detach "$mount_point" -quiet || hdiutil detach -force "$mount_point" -quiet || true
+          }
+          trap cleanup EXIT
+
+          app="$(find "$mount_point" -maxdepth 2 -type d -name '*.app' -print -quit)"
+          binary="$app/Contents/MacOS/bdmv-remuxer"
+          mkvmerge="$(command -v mkvmerge)"
+          fixture="$GITHUB_WORKSPACE/src-tauri/tests/fixtures/remux-smoke-input.mkv"
+          output="$RUNNER_TEMP/bdmv-remuxer-smoke-output.mkv"
+          report="$RUNNER_TEMP/bdmv-remuxer-smoke.log"
+          probe_log="$RUNNER_TEMP/bdmv-remuxer-smoke-probe.log"
+          test -x "$binary" || { echo "The mounted app executable is missing: $binary" >&2; exit 1; }
+          test -f "$fixture" || { echo "The remux smoke fixture is missing: $fixture" >&2; exit 1; }
+          rm -f "$output" "$report" "$probe_log"
+
+          if ! "$binary" --smoke-remux "$mkvmerge" "$fixture" "$output" "$report"; then
+            cat "$report" 2>/dev/null || true
+            exit 1
+          fi
+          cat "$report"
+          test -s "$output" || { echo "The installed app did not produce a non-empty remux output." >&2; exit 1; }
+          if ! "$mkvmerge" -J "$output" >"$probe_log" 2>&1; then
+            cat "$probe_log" >&2
+            echo "mkvmerge could not inspect the remux output." >&2
+            exit 1
+          fi
+          cat "$probe_log"
+          jq -e '(.container.type | test("Matroska")) and (.tracks | length > 0)' "$probe_log" >/dev/null || {
+            echo "The remux output is not a Matroska file with at least one track." >&2
+            exit 1
+          }
+          echo "Verified installed-app remux output: $(stat -f%z "$output") bytes."

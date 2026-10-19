@@ -981,6 +981,27 @@ fn should_intercept_close(is_running: bool, close_was_approved: bool) -> bool {
 // ============================================================================
 
 fn main() {
+    let args: Vec<String> = std::env::args().collect();
+    if args.get(1).map(String::as_str) == Some("--smoke-remux") {
+        let result = run_remux_smoke(&args);
+        let report = match &result {
+            Ok(report) => report.clone(),
+            Err(error) => format!("Installed app remux smoke failed: {}\n", error),
+        };
+
+        if let Some(log_path) = args.get(5) {
+            if let Err(error) = std::fs::write(log_path, &report) {
+                eprintln!(
+                    "Could not write remux smoke report to {}: {}\n{}",
+                    log_path, error, report
+                );
+                std::process::exit(2);
+            }
+        }
+        eprint!("{}", report);
+        std::process::exit(if result.is_ok() { 0 } else { 1 });
+    }
+
     let config_dir =
         settings_config_dir().expect("could not determine the platform config directory");
     let settings_outcome = Settings::load_with_recovery(&config_dir);
@@ -1056,6 +1077,44 @@ fn main() {
         })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+fn run_remux_smoke(args: &[String]) -> Result<String, String> {
+    if args.len() != 6 {
+        return Err(
+            "Usage: bdmv-remuxer --smoke-remux <mkvmerge> <input.mkv> <output.mkv> <report.log>"
+                .into(),
+        );
+    }
+
+    let job = MuxJob {
+        input_path: args[3].clone(),
+        output_path: args[4].clone(),
+        chapter_path: None,
+        tracks: Vec::new(),
+    };
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|error| format!("Could not start remux runtime: {}", error))?;
+    runtime.block_on(Muxer::run_mkvmerge(&args[2], &job))?;
+
+    let output = std::fs::metadata(&args[4]).map_err(|error| {
+        format!(
+            "Remux reported success but output {} is missing: {}",
+            args[4], error
+        )
+    })?;
+    if output.len() == 0 {
+        return Err(format!("Remux created an empty output file: {}", args[4]));
+    }
+
+    Ok(format!(
+        "Installed app remux smoke passed.\nInput: {}\nOutput: {}\nOutput size: {} bytes\n",
+        args[3],
+        args[4],
+        output.len()
+    ))
 }
 
 #[cfg(test)]
