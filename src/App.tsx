@@ -9,6 +9,7 @@ import {
 import { formatDuration, formatSize, getCategoryColor, getFileNumber, formatFileLabel } from './utils/format';
 import type { MediaFile, Track, Volume, Project, Settings as SettingsType, FileCategory } from './types';
 import { CATEGORIES, LANGUAGES } from './types';
+import { getVisibleNotice, isRecoveryBackupVisible } from './settingsRecoveryNotice.js';
 import './App.css';
 
 // ============================================================================
@@ -586,6 +587,7 @@ const App: React.FC = () => {
     muxerStatus,
     isLoading,
     error,
+    recoveryWarning,
     recoveryBackupAvailable,
     outputName,
     outputPath,
@@ -602,6 +604,7 @@ const App: React.FC = () => {
     stopMuxing,
     loadSettings,
     openRecoveryBackup,
+    dismissRecoveryWarning,
     loadQueue,
     loadCurrentVolumes,
     loadTrackTemplates,
@@ -613,6 +616,8 @@ const App: React.FC = () => {
   const [showSettings, setShowSettings] = useState(false);
   const [editingFile, setEditingFile] = useState<{ file: MediaFile; volumeId: string } | null>(null);
   const [editingTemplate, setEditingTemplate] = useState<FileCategory | null>(null);
+  const visibleNotice = getVisibleNotice(recoveryWarning, error);
+  const showRecoveryBackup = isRecoveryBackupVisible(recoveryWarning, recoveryBackupAvailable);
   
   // Initialize app
   useEffect(() => {
@@ -663,11 +668,11 @@ const App: React.FC = () => {
       </header>
       
       {/* Error Toast */}
-      {error && (
+      {visibleNotice && (
         <div className="error-toast">
           <AlertTriangle size={18} />
-          <span>{error}</span>
-          {recoveryBackupAvailable && (
+          <span>{visibleNotice}</span>
+          {showRecoveryBackup && (
             <button
               className="recovery-backup-button"
               onClick={openRecoveryBackup}
@@ -676,7 +681,13 @@ const App: React.FC = () => {
               <FolderOpen size={15} /> Open backup
             </button>
           )}
-          <button onClick={() => useAppStore.setState({ error: null })}><X size={16} /></button>
+          <button
+            onClick={() => recoveryWarning
+              ? dismissRecoveryWarning()
+              : useAppStore.setState({ error: null })}
+          >
+            <X size={16} />
+          </button>
         </div>
       )}
       

@@ -4,6 +4,12 @@ import { confirm, open } from '@tauri-apps/api/dialog';
 import { listen } from '@tauri-apps/api/event';
 import type { Volume, Project, Settings, Track, FileCategory } from './types';
 import { handleMuxCloseRequested } from './muxCloseConfirmation.js';
+import {
+  getRecoveryWarningDismissUpdate,
+  getSettingsLoadUpdate,
+  getSettingsSaveFailureUpdate,
+  getSettingsSaveSuccessUpdate,
+} from './settingsRecoveryNotice.js';
 
 interface MuxerStatus {
   is_running: boolean;
@@ -22,6 +28,7 @@ interface AppStore {
   volumes: Volume[];
   queue: Project[];
   settings: Settings | null;
+  recoveryWarning: string | null;
   recoveryBackupAvailable: boolean;
   trackTemplates: Record<string, Track[]>;
   selectedFileId: string | null;
@@ -48,6 +55,7 @@ interface AppStore {
   stopMuxing: () => Promise<void>;
   loadSettings: () => Promise<void>;
   openRecoveryBackup: () => Promise<void>;
+  dismissRecoveryWarning: () => void;
   saveSettings: (settings: Settings) => Promise<void>;
   loadQueue: () => Promise<void>;
   loadCurrentVolumes: () => Promise<void>;
@@ -62,6 +70,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
   volumes: [],
   queue: [],
   settings: null,
+  recoveryWarning: null,
   recoveryBackupAvailable: false,
   trackTemplates: {},
   selectedFileId: null,
@@ -248,11 +257,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
         recovery_warning: string | null;
         recovery_backup_available: boolean;
       }>('get_settings');
-      set({
-        settings: response.settings,
-        error: response.recovery_warning,
-        recoveryBackupAvailable: response.recovery_backup_available,
-      });
+      set(getSettingsLoadUpdate(response));
     } catch (e) {
       set({ error: String(e) });
     }
@@ -266,12 +271,14 @@ export const useAppStore = create<AppStore>((set, get) => ({
     }
   },
 
+  dismissRecoveryWarning: () => set(getRecoveryWarningDismissUpdate()),
+
   saveSettings: async (settings) => {
     try {
       await invoke('save_settings', { settings });
-      set({ settings, error: null, recoveryBackupAvailable: false });
+      set(getSettingsSaveSuccessUpdate(settings));
     } catch (e) {
-      set({ error: String(e) });
+      set(getSettingsSaveFailureUpdate(e));
     }
   },
 

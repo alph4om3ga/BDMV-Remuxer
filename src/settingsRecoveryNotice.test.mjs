@@ -1,0 +1,76 @@
+import assert from 'node:assert/strict';
+import test from 'node:test';
+import {
+  getRecoveryWarningDismissUpdate,
+  getSettingsLoadUpdate,
+  getSettingsSaveFailureUpdate,
+  getSettingsSaveSuccessUpdate,
+  getVisibleNotice,
+  isRecoveryBackupVisible,
+} from './settingsRecoveryNotice.js';
+
+const settings = { ffprobe_path: '/tools/ffprobe' };
+const backupPath = '/home/user/.config/bdmv-remuxer/settings.json.corrupt';
+const recoveryWarning = `Saved preferences could not be loaded. Defaults are active. The damaged file was preserved at ${backupPath}.`;
+
+function applyUpdate(state, update) {
+  return { ...state, ...update };
+}
+
+test('malformed settings response shows the recovery warning and its backup action', () => {
+  const response = {
+    settings,
+    recovery_warning: recoveryWarning,
+    recovery_backup_available: true,
+  };
+  const state = applyUpdate({
+    error: null,
+    recoveryWarning: null,
+    recoveryBackupAvailable: false,
+  }, getSettingsLoadUpdate(response));
+
+  assert.equal(getVisibleNotice(state.recoveryWarning, state.error), recoveryWarning);
+  assert.match(getVisibleNotice(state.recoveryWarning, state.error), new RegExp(backupPath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+  assert.equal(isRecoveryBackupVisible(state.recoveryWarning, state.recoveryBackupAvailable), true);
+});
+
+test('the recovery warning remains visible after a failed settings save', () => {
+  const recovered = applyUpdate({
+    error: null,
+    recoveryWarning: null,
+    recoveryBackupAvailable: false,
+  }, getSettingsLoadUpdate({
+    settings,
+    recovery_warning: recoveryWarning,
+    recovery_backup_available: true,
+  }));
+  const afterFailedSave = applyUpdate(recovered, getSettingsSaveFailureUpdate('settings are read-only'));
+
+  assert.equal(afterFailedSave.error, 'settings are read-only');
+  assert.equal(getVisibleNotice(afterFailedSave.recoveryWarning, afterFailedSave.error), recoveryWarning);
+  assert.equal(isRecoveryBackupVisible(afterFailedSave.recoveryWarning, afterFailedSave.recoveryBackupAvailable), true);
+});
+
+test('dismissing the warning hides it without discarding the backup availability', () => {
+  const state = applyUpdate({
+    error: null,
+    recoveryWarning,
+    recoveryBackupAvailable: true,
+  }, getRecoveryWarningDismissUpdate());
+
+  assert.equal(getVisibleNotice(state.recoveryWarning, state.error), null);
+  assert.equal(isRecoveryBackupVisible(state.recoveryWarning, state.recoveryBackupAvailable), false);
+  assert.equal(state.recoveryBackupAvailable, true);
+});
+
+test('a successful settings save clears the recovery warning and backup action', () => {
+  const state = applyUpdate({
+    error: 'previous save failed',
+    recoveryWarning,
+    recoveryBackupAvailable: true,
+  }, getSettingsSaveSuccessUpdate(settings));
+
+  assert.equal(state.settings, settings);
+  assert.equal(getVisibleNotice(state.recoveryWarning, state.error), null);
+  assert.equal(isRecoveryBackupVisible(state.recoveryWarning, state.recoveryBackupAvailable), false);
+});
