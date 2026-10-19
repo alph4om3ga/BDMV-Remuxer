@@ -204,12 +204,31 @@ impl Muxer {
     }
 }
 
-fn staged_output_path(output_path: &Path) -> PathBuf {
+pub(crate) fn staged_output_path(output_path: &Path) -> PathBuf {
     let filename = output_path
         .file_name()
         .and_then(|filename| filename.to_str())
         .unwrap_or("output.mkv");
     output_path.with_file_name(format!(".{}.partial.mkv", filename))
+}
+
+pub(crate) fn remove_staged_output(output_path: &Path) -> Result<(), String> {
+    let staged_path = staged_output_path(output_path);
+    match std::fs::metadata(&staged_path) {
+        Ok(_) => std::fs::remove_file(&staged_path).map_err(|error| {
+            format!(
+                "Failed to remove interrupted output {}: {}",
+                staged_path.display(),
+                error
+            )
+        }),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!(
+            "Failed to check for interrupted output {}: {}",
+            staged_path.display(),
+            error
+        )),
+    }
 }
 
 async fn promote_staged_output(staged_path: &Path, output_path: &Path) -> Result<(), String> {

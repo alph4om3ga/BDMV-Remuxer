@@ -7,7 +7,7 @@ mod state;
 mod tool_error;
 
 use crate::bdmv::{BdmvParser, MediaFile, Track, Volume};
-use crate::muxer::{MuxJob, MuxProgress, Muxer};
+use crate::muxer::{remove_staged_output, MuxJob, MuxProgress, Muxer};
 use crate::state::{
     settings_directory_for_config_root, source_file_fingerprint, AppState, CompletedFile, Project,
     ProjectStatus, Settings, SettingsRecoveryPreview,
@@ -300,10 +300,73 @@ async fn create_project(
 }
 
 #[tauri::command]
-async fn remove_project(project_id: String, state: State<'_, AppStateType>) -> Result<(), String> {
+async fn remove_project(
+    project_id: String,
+    state: State<'_, AppStateType>,
+    muxer_state: State<'_, Arc<Mutex<Muxer>>>,
+) -> Result<(), String> {
+    let muxer = muxer_state.lock();
     let mut app_state = state.lock();
-    app_state.queue.retain(|p| p.id != project_id);
+    prepare_project_removal(&mut app_state, &project_id, muxer.is_running)?;
     app_state.persist_workspace()?;
+    Ok(())
+}
+
+fn prepare_project_removal(
+    app_state: &mut AppState,
+    project_id: &str,
+    muxer_running: bool,
+) -> Result<(), String> {
+    if app_state
+        .queue
+        .iter()
+        .find(|project| project.id == project_id)
+        .is_some_and(|project| project.status == ProjectStatus::Processing)
+    {
+        return Err("Cannot remove a project while it is being processed".into());
+    }
+
+    if muxer_running {
+        let active_project_id = app_state
+            .queue
+            .iter()
+            .find(|project| {
+                matches!(
+                    project.status,
+                    ProjectStatus::Pending | ProjectStatus::Processing
+                )
+            })
+            .map(|project| project.id.as_str());
+        if active_project_id == Some(project_id) {
+            return Err("Cannot remove a project while it is being processed".into());
+        }
+    }
+
+    if let Some(project) = app_state.queue.iter().find(|p| p.id == project_id) {
+        remove_project_staged_outputs(project)?;
+    }
+    app_state.queue.retain(|p| p.id != project_id);
+    Ok(())
+}
+
+fn remove_project_staged_outputs(project: &Project) -> Result<(), String> {
+    for volume in &project.volumes {
+        for file in &volume.files {
+            if project.is_file_completed(&file.path) {
+                continue;
+            }
+            let subfolder = match file.category.as_str() {
+                "EPISODE" => "Episode",
+                _ => "Extra",
+            };
+            let output_filename = generate_output_filename(file, &project.output_name);
+            let output_path = PathBuf::from(&project.output_path)
+                .join(&project.output_name)
+                .join(subfolder)
+                .join(output_filename);
+            remove_staged_output(&output_path)?;
+        }
+    }
     Ok(())
 }
 
@@ -1735,6 +1798,178 @@ mod queue_retry_tests {
             ensure_muxer_idle(&muxer).unwrap_err(),
             "Muxer is already running"
         );
+    }
+}
+
+#[cfg(test)]
+mod project_removal_tests {
+    use super::{prepare_project_removal, remove_project_staged_outputs};
+    use crate::bdmv::{MediaFile, Volume};
+    use crate::muxer::staged_output_path;
+    use crate::state::{AppState, CompletedFile, Project, ProjectStatus};
+    use chrono::Utc;
+    use std::collections::HashMap;
+    use std::fs;
+    use std::path::{Path, PathBuf};
+    use uuid::Uuid;
+
+    fn removal_fixture(directory: &Path, status: ProjectStatus) -> Project {
+        let make_file = |filename: &str, path: &str, episode_number| MediaFile {
+            id: filename.into(),
+            filename: filename.into(),
+            path: path.into(),
+            duration: 0.0,
+            size: 0,
+            category: "EPISODE".into(),
+            tracks: Vec::new(),
+            episode_number,
+            op_number: None,
+            ed_number: None,
+            special_number: None,
+            chapter_file: None,
+        };
+        Project {
+            id: "removable-project".into(),
+            output_name: "Show".into(),
+            output_path: directory.to_string_lossy().into_owned(),
+            volumes: vec![Volume {
+                id: "volume-1".into(),
+                name: "Disc 1".into(),
+                volume_number: 1,
+                files: vec![
+                    make_file("00001.m2ts", "/source/00001.m2ts", Some(1)),
+                    make_file("00002.m2ts", "/source/00002.m2ts", Some(2)),
+                ],
+                probe_failures: Vec::new(),
+            }],
+            track_templates: HashMap::new(),
+            status,
+            progress: 50.0,
+            current_file: None,
+            completed_files: vec![CompletedFile {
+                path: "/source/00001.m2ts".into(),
+                fingerprint: Some("completed-fingerprint".into()),
+            }],
+            created_at: Utc::now(),
+            error: None,
+        }
+    }
+
+    fn temporary_directory() -> PathBuf {
+        let directory = std::env::temp_dir().join(format!(
+            "bdmv-remuxer-project-removal-test-{}",
+            Uuid::new_v4()
+        ));
+        fs::create_dir_all(&directory).unwrap();
+        directory
+    }
+
+    fn output_paths(project: &Project) -> (PathBuf, PathBuf) {
+        let output_directory = PathBuf::from(&project.output_path)
+            .join(&project.output_name)
+            .join("Episode");
+        (
+            output_directory.join("Show - E01.mkv"),
+            output_directory.join("Show - E02.mkv"),
+        )
+    }
+
+    #[test]
+    fn removing_project_cleans_only_unfinished_stage_and_preserves_completed_output() {
+        let directory = temporary_directory();
+        let project = removal_fixture(&directory, ProjectStatus::Error);
+        let (completed_output, unfinished_output) = output_paths(&project);
+        fs::create_dir_all(completed_output.parent().unwrap()).unwrap();
+        fs::write(&completed_output, "completed output").unwrap();
+        let completed_stage = staged_output_path(&completed_output);
+        let unfinished_stage = staged_output_path(&unfinished_output);
+        fs::write(&completed_stage, "do not remove").unwrap();
+        fs::write(&unfinished_stage, "interrupted output").unwrap();
+        let mut app_state = AppState::default();
+        app_state.queue.push(project);
+
+        prepare_project_removal(&mut app_state, "removable-project", false).unwrap();
+
+        assert_eq!(
+            fs::read_to_string(&completed_output).unwrap(),
+            "completed output"
+        );
+        assert_eq!(
+            fs::read_to_string(&completed_stage).unwrap(),
+            "do not remove"
+        );
+        assert!(!unfinished_stage.exists());
+        assert!(app_state.queue.is_empty());
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn cleanup_failure_is_reported_and_project_remains_queued() {
+        let directory = temporary_directory();
+        let project = removal_fixture(&directory, ProjectStatus::Error);
+        let (_, unfinished_output) = output_paths(&project);
+        let unfinished_stage = staged_output_path(&unfinished_output);
+        fs::create_dir_all(&unfinished_stage).unwrap();
+        let mut app_state = AppState::default();
+        app_state.queue.push(project);
+
+        let error =
+            prepare_project_removal(&mut app_state, "removable-project", false).unwrap_err();
+
+        assert!(
+            error.contains(&unfinished_stage.display().to_string()),
+            "{error}"
+        );
+        assert_eq!(app_state.queue.len(), 1);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn active_project_cannot_be_removed_or_have_its_stage_cleaned() {
+        let directory = temporary_directory();
+        let project = removal_fixture(&directory, ProjectStatus::Processing);
+        let (_, unfinished_output) = output_paths(&project);
+        let unfinished_stage = staged_output_path(&unfinished_output);
+        fs::create_dir_all(unfinished_stage.parent().unwrap()).unwrap();
+        fs::write(&unfinished_stage, "active output").unwrap();
+        let mut app_state = AppState::default();
+        app_state.queue.push(project);
+
+        let error = prepare_project_removal(&mut app_state, "removable-project", true).unwrap_err();
+
+        assert!(error.contains("being processed"));
+        assert!(unfinished_stage.exists());
+        assert_eq!(app_state.queue.len(), 1);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn running_queue_cannot_remove_its_next_project_before_worker_selects_it() {
+        let directory = temporary_directory();
+        let project = removal_fixture(&directory, ProjectStatus::Pending);
+        let (_, unfinished_output) = output_paths(&project);
+        let unfinished_stage = staged_output_path(&unfinished_output);
+        fs::create_dir_all(unfinished_stage.parent().unwrap()).unwrap();
+        fs::write(&unfinished_stage, "queued output").unwrap();
+        let mut app_state = AppState::default();
+        app_state.queue.push(project);
+
+        let error = prepare_project_removal(&mut app_state, "removable-project", true).unwrap_err();
+
+        assert!(error.contains("being processed"));
+        assert!(unfinished_stage.exists());
+        assert_eq!(app_state.queue.len(), 1);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn cleanup_helper_accepts_projects_without_staged_outputs() {
+        let directory = temporary_directory();
+        let project = removal_fixture(&directory, ProjectStatus::Error);
+
+        remove_project_staged_outputs(&project).unwrap();
+
+        fs::remove_dir_all(directory).unwrap();
     }
 }
 
