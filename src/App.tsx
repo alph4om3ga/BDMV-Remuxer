@@ -664,12 +664,12 @@ const App: React.FC = () => {
     <div className="app">
       {/* Header */}
       <header className="header">
-        <div className="logo">
+        <h1 className="logo" aria-label="BDMV Remuxer main interface">
           <div className="logo-icon">
             <Film size={24} color="white" />
           </div>
           BDMV Remuxer
-        </div>
+        </h1>
         <div className="header-actions">
           <button className="btn secondary" onClick={() => setShowSettings(true)}>
             <Settings size={18} /> Settings
