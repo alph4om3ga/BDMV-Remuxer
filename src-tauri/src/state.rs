@@ -1079,6 +1079,42 @@ mod tests {
     }
 
     #[test]
+    fn incompatible_json_settings_are_preserved_and_defaults_are_used() {
+        let config_dir = temporary_config_dir();
+        std::fs::create_dir_all(&config_dir).unwrap();
+        let settings_path = config_dir.join("settings.json");
+        let incompatible_contents =
+            include_bytes!("../tests/fixtures/settings-incompatible-type.json");
+        assert!(serde_json::from_slice::<serde_json::Value>(incompatible_contents).is_ok());
+        std::fs::write(&settings_path, incompatible_contents).unwrap();
+
+        let outcome = Settings::load_with_recovery(&config_dir);
+
+        let warning = outcome.recovery_warning.as_deref().unwrap();
+        assert!(warning.contains("Saved preferences could not be loaded"));
+        assert!(warning.contains("Defaults are active"));
+        assert!(warning.contains("settings.json.corrupt"));
+        assert!(outcome.can_save);
+        assert_eq!(
+            serde_json::to_value(&outcome.settings).unwrap(),
+            serde_json::to_value(Settings::default()).unwrap()
+        );
+        assert_eq!(
+            std::fs::read(&settings_path).unwrap(),
+            incompatible_contents
+        );
+
+        let backup_path = config_dir.join("settings.json.corrupt");
+        assert_eq!(
+            outcome.recovery_backup_path.as_deref(),
+            Some(backup_path.as_path())
+        );
+        assert_eq!(std::fs::read(&backup_path).unwrap(), incompatible_contents);
+
+        std::fs::remove_dir_all(config_dir).unwrap();
+    }
+
+    #[test]
     fn malformed_settings_use_a_new_backup_name_without_replacing_an_existing_backup() {
         let config_dir = temporary_config_dir();
         std::fs::create_dir_all(&config_dir).unwrap();

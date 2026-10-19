@@ -1,0 +1,10 @@
+{
+  "mkvmerge_path": "mkvmerge",
+  "ffprobe_path": "ffprobe",
+  "min_episode_duration": "twenty minutes",
+  "min_extra_duration": 120,
+  "op_ed_min_duration": 80,
+  "op_ed_max_duration": 110,
+  "episode_folder_name": "Episode",
+  "extra_folder_name": "Extra"
+}
