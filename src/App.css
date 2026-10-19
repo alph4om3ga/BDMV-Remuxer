@@ -563,6 +563,16 @@ input:focus, select:focus {
 
 .error-toast span { flex: 1; }
 .error-toast button { background: none; color: inherit; padding: 2px; }
+.error-toast .recovery-backup-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 9px;
+  border: 1px solid rgba(239,68,68,.45);
+  border-radius: var(--radius);
+  white-space: nowrap;
+}
+.error-toast .recovery-backup-button:hover { background: rgba(239,68,68,.12); }
 .error-text { color: var(--danger); }
 
 /* ============================================================================

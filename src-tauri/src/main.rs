@@ -730,6 +730,7 @@ async fn get_settings(state: State<'_, AppStateType>) -> Result<SettingsResponse
     Ok(SettingsResponse {
         settings: app_state.settings.clone(),
         recovery_warning: app_state.settings_recovery_warning().map(str::to_string),
+        recovery_backup_available: app_state.settings_recovery_backup_path().is_some(),
     })
 }
 
@@ -737,6 +738,35 @@ async fn get_settings(state: State<'_, AppStateType>) -> Result<SettingsResponse
 struct SettingsResponse {
     settings: Settings,
     recovery_warning: Option<String>,
+    recovery_backup_available: bool,
+}
+
+#[tauri::command]
+async fn open_settings_recovery_backup(
+    window: Window,
+    state: State<'_, AppStateType>,
+) -> Result<(), String> {
+    let backup_path = state
+        .lock()
+        .settings_recovery_backup_path()
+        .map(PathBuf::from)
+        .ok_or_else(|| "There is no recovered preferences backup to open.".to_string())?;
+
+    if !backup_path.is_file() {
+        return Err(format!(
+            "The recovered preferences backup is no longer available at {}.",
+            backup_path.display()
+        ));
+    }
+
+    let path = backup_path.to_string_lossy();
+    tauri::api::shell::open(&window.shell_scope(), path.as_ref(), None).map_err(|error| {
+        format!(
+            "Could not open the recovered preferences backup at {}: {}",
+            backup_path.display(),
+            error
+        )
+    })
 }
 
 #[tauri::command]
@@ -746,7 +776,7 @@ async fn save_settings(settings: Settings, state: State<'_, AppStateType>) -> Re
     let config_dir = settings_config_dir()?;
     settings.save_to_config_dir(&config_dir)?;
     app_state.settings = settings;
-    app_state.set_settings_recovery(None, true);
+    app_state.set_settings_recovery(None, None, true);
     Ok(())
 }
 
@@ -831,8 +861,11 @@ fn main() {
     }
     let mut restored_state = AppState::default();
     restored_state.settings = settings_outcome.settings;
-    restored_state
-        .set_settings_recovery(settings_outcome.recovery_warning, settings_outcome.can_save);
+    restored_state.set_settings_recovery(
+        settings_outcome.recovery_warning,
+        settings_outcome.recovery_backup_path,
+        settings_outcome.can_save,
+    );
     if let Err(error) = restored_state.restore_workspace(&config_dir) {
         eprintln!("{}", error);
         restored_state.set_persistence_error(error, &config_dir);
@@ -874,6 +907,7 @@ fn main() {
             confirm_close,
             // Settings
             get_settings,
+            open_settings_recovery_backup,
             save_settings,
             save_track_template,
             get_track_templates,

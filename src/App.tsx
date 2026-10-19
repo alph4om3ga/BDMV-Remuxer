@@ -586,6 +586,7 @@ const App: React.FC = () => {
     muxerStatus,
     isLoading,
     error,
+    recoveryBackupAvailable,
     outputName,
     outputPath,
     loadBdmv,
@@ -600,6 +601,7 @@ const App: React.FC = () => {
     resumeMuxing,
     stopMuxing,
     loadSettings,
+    openRecoveryBackup,
     loadQueue,
     loadCurrentVolumes,
     loadTrackTemplates,
@@ -665,6 +667,15 @@ const App: React.FC = () => {
         <div className="error-toast">
           <AlertTriangle size={18} />
           <span>{error}</span>
+          {recoveryBackupAvailable && (
+            <button
+              className="recovery-backup-button"
+              onClick={openRecoveryBackup}
+              title="Open the preserved preferences backup"
+            >
+              <FolderOpen size={15} /> Open backup
+            </button>
+          )}
           <button onClick={() => useAppStore.setState({ error: null })}><X size={16} /></button>
         </div>
       )}

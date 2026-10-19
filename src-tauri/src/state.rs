@@ -52,6 +52,7 @@ impl Settings {
                 Ok(settings) => SettingsLoadOutcome {
                     settings,
                     recovery_warning: None,
+                    recovery_backup_path: None,
                     can_save: true,
                 },
                 Err(parse_error) => match preserve_damaged_settings(config_dir, &contents) {
@@ -64,6 +65,7 @@ impl Settings {
                             parse_error,
                             backup_path.display()
                         )),
+                        recovery_backup_path: Some(backup_path),
                         can_save: true,
                     },
                     Err(backup_error) => SettingsLoadOutcome {
@@ -76,6 +78,7 @@ impl Settings {
                             backup_error,
                             path.display()
                         )),
+                        recovery_backup_path: None,
                         can_save: false,
                     },
                 },
@@ -83,6 +86,7 @@ impl Settings {
             Err(error) if error.kind() == ErrorKind::NotFound => SettingsLoadOutcome {
                 settings: Self::default(),
                 recovery_warning: None,
+                recovery_backup_path: None,
                 can_save: true,
             },
             Err(error) => SettingsLoadOutcome {
@@ -93,6 +97,7 @@ impl Settings {
                     path.display(),
                     error
                 )),
+                recovery_backup_path: None,
                 can_save: false,
             },
         }
@@ -122,6 +127,7 @@ pub fn settings_directory_for_config_root(config_root: &Path) -> PathBuf {
 pub struct SettingsLoadOutcome {
     pub settings: Settings,
     pub recovery_warning: Option<String>,
+    pub recovery_backup_path: Option<PathBuf>,
     pub can_save: bool,
 }
 
@@ -313,17 +319,28 @@ pub struct AppState {
     persistence_path: Option<PathBuf>,
     persistence_error: Option<String>,
     settings_recovery_warning: Option<String>,
+    settings_recovery_backup_path: Option<PathBuf>,
     settings_save_blocked: bool,
 }
 
 impl AppState {
-    pub fn set_settings_recovery(&mut self, warning: Option<String>, can_save: bool) {
+    pub fn set_settings_recovery(
+        &mut self,
+        warning: Option<String>,
+        backup_path: Option<PathBuf>,
+        can_save: bool,
+    ) {
         self.settings_recovery_warning = warning;
+        self.settings_recovery_backup_path = backup_path;
         self.settings_save_blocked = !can_save;
     }
 
     pub fn settings_recovery_warning(&self) -> Option<&str> {
         self.settings_recovery_warning.as_deref()
+    }
+
+    pub fn settings_recovery_backup_path(&self) -> Option<&Path> {
+        self.settings_recovery_backup_path.as_deref()
     }
 
     pub fn ensure_settings_savable(&self) -> Result<(), String> {
@@ -512,6 +529,10 @@ mod tests {
 
         let backup_path = config_dir.join("settings.json.corrupt");
         assert_eq!(
+            outcome.recovery_backup_path.as_deref(),
+            Some(backup_path.as_path())
+        );
+        assert_eq!(
             std::fs::read_to_string(&backup_path).unwrap(),
             damaged_contents
         );
@@ -556,6 +577,7 @@ mod tests {
         let mut state = AppState::default();
         state.set_settings_recovery(
             Some("Could not preserve damaged preferences.".into()),
+            None,
             false,
         );
 

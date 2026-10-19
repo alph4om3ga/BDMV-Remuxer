@@ -22,6 +22,7 @@ interface AppStore {
   volumes: Volume[];
   queue: Project[];
   settings: Settings | null;
+  recoveryBackupAvailable: boolean;
   trackTemplates: Record<string, Track[]>;
   selectedFileId: string | null;
   expandedVolumes: Record<string, boolean>;
@@ -46,6 +47,7 @@ interface AppStore {
   resumeMuxing: () => Promise<void>;
   stopMuxing: () => Promise<void>;
   loadSettings: () => Promise<void>;
+  openRecoveryBackup: () => Promise<void>;
   saveSettings: (settings: Settings) => Promise<void>;
   loadQueue: () => Promise<void>;
   loadCurrentVolumes: () => Promise<void>;
@@ -60,6 +62,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
   volumes: [],
   queue: [],
   settings: null,
+  recoveryBackupAvailable: false,
   trackTemplates: {},
   selectedFileId: null,
   expandedVolumes: {},
@@ -240,8 +243,24 @@ export const useAppStore = create<AppStore>((set, get) => ({
 
   loadSettings: async () => {
     try {
-      const response = await invoke<{ settings: Settings; recovery_warning: string | null }>('get_settings');
-      set({ settings: response.settings, error: response.recovery_warning });
+      const response = await invoke<{
+        settings: Settings;
+        recovery_warning: string | null;
+        recovery_backup_available: boolean;
+      }>('get_settings');
+      set({
+        settings: response.settings,
+        error: response.recovery_warning,
+        recoveryBackupAvailable: response.recovery_backup_available,
+      });
+    } catch (e) {
+      set({ error: String(e) });
+    }
+  },
+
+  openRecoveryBackup: async () => {
+    try {
+      await invoke('open_settings_recovery_backup');
     } catch (e) {
       set({ error: String(e) });
     }
@@ -250,7 +269,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
   saveSettings: async (settings) => {
     try {
       await invoke('save_settings', { settings });
-      set({ settings, error: null });
+      set({ settings, error: null, recoveryBackupAvailable: false });
     } catch (e) {
       set({ error: String(e) });
     }
