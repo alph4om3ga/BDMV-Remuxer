@@ -540,13 +540,14 @@ async fn confirm_close(
     state: State<'_, AppStateType>,
     muxer_state: State<'_, Arc<Mutex<Muxer>>>,
     close_approval: State<'_, Arc<AtomicBool>>,
+    close_retry_required: State<'_, Arc<AtomicBool>>,
 ) -> Result<(), String> {
     let wait_for_muxer = {
         // Keep the muxer lock while saving the paused queue so the worker cannot
         // start another file between the save and the shutdown request.
         let mut muxer = muxer_state.lock();
         let mut app_state = state.lock();
-        prepare_close(&mut app_state, &mut muxer)?
+        prepare_close_with_retry_state(&mut app_state, &mut muxer, close_retry_required.inner())?
     };
 
     while wait_for_muxer && muxer_state.lock().is_running {
@@ -567,6 +568,23 @@ fn prepare_close(app_state: &mut AppState, muxer: &mut Muxer) -> Result<bool, St
         Ok(true)
     } else {
         Ok(false)
+    }
+}
+
+fn prepare_close_with_retry_state(
+    app_state: &mut AppState,
+    muxer: &mut Muxer,
+    close_retry_required: &AtomicBool,
+) -> Result<bool, String> {
+    match prepare_close(app_state, muxer) {
+        Ok(wait_for_muxer) => {
+            close_retry_required.store(false, Ordering::SeqCst);
+            Ok(wait_for_muxer)
+        }
+        Err(error) => {
+            close_retry_required.store(true, Ordering::SeqCst);
+            Err(error)
+        }
     }
 }
 
@@ -1276,8 +1294,12 @@ async fn get_media_info(path: String, state: State<'_, AppStateType>) -> Result<
         .map_err(|e| e.to_string())
 }
 
-fn should_intercept_close(is_running: bool, close_was_approved: bool) -> bool {
-    is_running && !close_was_approved
+fn should_intercept_close(
+    is_running: bool,
+    close_was_approved: bool,
+    close_retry_required: bool,
+) -> bool {
+    (is_running || close_retry_required) && !close_was_approved
 }
 
 // ============================================================================
@@ -1341,12 +1363,14 @@ fn main() {
     let app_state: AppStateType = Arc::new(Mutex::new(restored_state));
     let muxer_state: Arc<Mutex<Muxer>> = Arc::new(Mutex::new(Muxer::default()));
     let close_approval = Arc::new(AtomicBool::new(false));
+    let close_retry_required = Arc::new(AtomicBool::new(false));
     let recovery_smoke_report_path = recovery_smoke.map(|(_, report_path)| report_path);
 
     tauri::Builder::default()
         .manage(app_state)
         .manage(muxer_state)
         .manage(close_approval.clone())
+        .manage(close_retry_required.clone())
         .setup(move |app| {
             if let Some(report_path) = recovery_smoke_report_path {
                 let result = (|| -> Result<String, String> {
@@ -1449,9 +1473,17 @@ fn main() {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event.event() {
                 let close_was_approved = close_approval.swap(false, Ordering::SeqCst);
                 let muxer_state = event.window().state::<Arc<Mutex<Muxer>>>();
-                if should_intercept_close(muxer_state.lock().is_running, close_was_approved) {
+                let muxer_is_running = muxer_state.lock().is_running;
+                let retry_required = close_retry_required.load(Ordering::SeqCst);
+                if should_intercept_close(muxer_is_running, close_was_approved, retry_required) {
                     api.prevent_close();
-                    let _ = event.window().emit("mux-close-requested", ());
+                    let _ = event.window().emit(
+                        "mux-close-requested",
+                        serde_json::json!({
+                            "is_running": muxer_is_running,
+                            "persistence_retry_required": retry_required,
+                        }),
+                    );
                 }
             }
         })
@@ -1560,7 +1592,7 @@ mod recovery_open_tests {
 
 #[cfg(test)]
 mod close_tests {
-    use super::{prepare_close, should_intercept_close, Project, ProjectStatus};
+    use super::{prepare_close_with_retry_state, should_intercept_close, Project, ProjectStatus};
     use crate::muxer::Muxer;
     use crate::state::AppState;
     use chrono::Utc;
@@ -1570,14 +1602,16 @@ mod close_tests {
     use uuid::Uuid;
 
     #[test]
-    fn close_is_intercepted_only_while_muxing_without_prior_approval() {
-        assert!(!should_intercept_close(false, false));
-        assert!(should_intercept_close(true, false));
-        assert!(!should_intercept_close(true, true));
+    fn close_is_intercepted_while_muxing_or_retry_is_required_without_approval() {
+        assert!(!should_intercept_close(false, false, false));
+        assert!(should_intercept_close(true, false, false));
+        assert!(!should_intercept_close(true, true, false));
+        assert!(should_intercept_close(false, false, true));
+        assert!(!should_intercept_close(false, true, true));
     }
 
     #[test]
-    fn failed_workspace_save_keeps_muxer_running_and_retry_persists_paused_queue() {
+    fn failed_workspace_save_requires_retry_even_after_muxer_stops() {
         let config_dir =
             std::env::temp_dir().join(format!("bdmv-remuxer-close-test-{}", Uuid::new_v4()));
         let mut app_state = AppState::default();
@@ -1605,23 +1639,54 @@ mod close_tests {
             shutdown_requested: false,
         };
         let close_approval = AtomicBool::new(false);
+        let close_retry_required = AtomicBool::new(false);
 
-        let error = prepare_close(&mut app_state, &mut muxer).unwrap_err();
+        let error =
+            prepare_close_with_retry_state(&mut app_state, &mut muxer, &close_retry_required)
+                .unwrap_err();
 
         assert!(error.contains("Failed to create workspace directory"));
+        assert!(close_retry_required.load(Ordering::SeqCst));
         assert!(should_intercept_close(
             muxer.is_running,
-            close_approval.load(Ordering::SeqCst)
+            close_approval.load(Ordering::SeqCst),
+            close_retry_required.load(Ordering::SeqCst)
         ));
         assert!(!muxer.shutdown_requested);
         assert_eq!(app_state.queue[0].status, ProjectStatus::Paused);
 
+        muxer.is_running = false;
+        assert!(should_intercept_close(
+            muxer.is_running,
+            close_approval.load(Ordering::SeqCst),
+            close_retry_required.load(Ordering::SeqCst)
+        ));
+
+        let retry_error =
+            prepare_close_with_retry_state(&mut app_state, &mut muxer, &close_retry_required)
+                .unwrap_err();
+        assert!(retry_error.contains("Failed to create workspace directory"));
+        assert!(close_retry_required.load(Ordering::SeqCst));
+        assert!(should_intercept_close(
+            muxer.is_running,
+            close_approval.load(Ordering::SeqCst),
+            close_retry_required.load(Ordering::SeqCst)
+        ));
+
         fs::remove_file(&config_dir).unwrap();
         fs::create_dir_all(&config_dir).unwrap();
 
-        assert!(prepare_close(&mut app_state, &mut muxer).unwrap());
-        assert!(muxer.shutdown_requested);
+        assert!(
+            !prepare_close_with_retry_state(&mut app_state, &mut muxer, &close_retry_required)
+                .unwrap()
+        );
+        assert!(!close_retry_required.load(Ordering::SeqCst));
         assert!(!close_approval.load(Ordering::SeqCst));
+        assert!(!should_intercept_close(
+            muxer.is_running,
+            close_approval.load(Ordering::SeqCst),
+            close_retry_required.load(Ordering::SeqCst)
+        ));
         let saved_workspace: serde_json::Value =
             serde_json::from_slice(&fs::read(config_dir.join("workspace.json")).unwrap()).unwrap();
         assert_eq!(saved_workspace["queue"][0]["status"], "paused");

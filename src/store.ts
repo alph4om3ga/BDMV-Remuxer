@@ -11,7 +11,10 @@ import type {
   Track,
   FileCategory,
 } from './types';
-import { handleMuxCloseRequested } from './muxCloseConfirmation.js';
+import {
+  getMuxCloseConfirmation,
+  handleMuxCloseRequested,
+} from './muxCloseConfirmation.js';
 import {
   getRecoveryWarningDismissUpdate,
   getSettingsLoadUpdate,
@@ -492,15 +495,21 @@ export const useAppStore = create<AppStore>((set, get) => ({
       set({ error: payload });
     });
 
-    listen('mux-close-requested', async () => {
-      await handleMuxCloseRequested(
-        () => confirm(
-          'Muxing is still in progress. Close the app? The current file will finish first; remaining work will be saved as Paused.',
-          { title: 'Muxing in progress', type: 'warning' },
-        ),
-        () => invoke('confirm_close'),
-        (error) => set({ error }),
-      );
-    });
+    listen<{ is_running: boolean; persistence_retry_required: boolean }>(
+      'mux-close-requested',
+      async ({ payload }) => {
+        await handleMuxCloseRequested(
+          () => {
+            const prompt = getMuxCloseConfirmation(
+              payload.is_running,
+              payload.persistence_retry_required,
+            );
+            return confirm(prompt.message, { title: prompt.title, type: 'warning' });
+          },
+          () => invoke('confirm_close'),
+          (error) => set({ error }),
+        );
+      },
+    );
   },
 }));
