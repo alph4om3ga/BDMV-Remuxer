@@ -113,7 +113,7 @@ To review how the artwork reads at small and large sizes, run:
 npm run icons:preview
 ```
 
-Open `generated-artifacts/icon-preview.png`. The sheet shows pixel-perfect enlarged previews of the 16px, 32px, 128px, and 256px icon sizes, plus 16px and 32px samples at native size. At the native sizes, check that the play triangle remains distinct and the disc rings and arrow are still readable. The preview is generated from the SVG master and is not a bundled application icon.
+The preview command first runs the automated 16px and 32px source-art contrast check. You can run it alone with `npm run icons:artwork-check`; `npm run test:icon-artwork` also verifies that removing the play triangle or flattening the disc rings is rejected. Open `generated-artifacts/icon-preview.png` to review pixel-perfect enlarged previews of the configured icon sizes and 16px and 32px samples at native size. The preview is generated from the SVG master and is not a bundled application icon.
 
 ## Usage
 

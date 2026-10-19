@@ -2,12 +2,15 @@ import { mkdir, readFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import sharp from "sharp";
+import { assertIconArtwork } from "./check-icon-artwork.mjs";
 
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const tauriConfigPath = resolve(projectRoot, "src-tauri/tauri.conf.json");
 const tauriConfigDirectory = dirname(tauriConfigPath);
 const sourcePath = resolve(projectRoot, "src-tauri/icons/icon.svg");
 const outputPath = resolve(projectRoot, "generated-artifacts/icon-preview.png");
+const artworkMetrics = await assertIconArtwork(sourcePath);
+console.log(`Source artwork check passed:\n${artworkMetrics.join("\n")}`);
 const config = JSON.parse(await readFile(tauriConfigPath, "utf8"));
 const configuredIcons = config.tauri?.bundle?.icon;
 
