@@ -417,14 +417,23 @@ async fn confirm_close(
     muxer_state: State<'_, Arc<Mutex<Muxer>>>,
     close_approval: State<'_, Arc<AtomicBool>>,
 ) -> Result<(), String> {
-    {
+    let wait_for_muxer = {
+        // Keep the muxer lock while saving the paused queue so the worker cannot
+        // start another file between the save and the shutdown request.
         let mut muxer = muxer_state.lock();
-        muxer.is_running = false;
-        muxer.is_paused = false;
-    }
-    {
         let mut app_state = state.lock();
         app_state.pause_incomplete_projects()?;
+        if muxer.is_running {
+            muxer.is_paused = false;
+            muxer.shutdown_requested = true;
+            true
+        } else {
+            false
+        }
+    };
+
+    while wait_for_muxer && muxer_state.lock().is_running {
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
     }
 
     close_approval.store(true, Ordering::SeqCst);
@@ -475,11 +484,11 @@ struct MuxerStatus {
 async fn run_mux_queue(window: Window, state: AppStateType, muxer_state: Arc<Mutex<Muxer>>) {
     loop {
         // Check if we should stop or wait (drop guard before any await)
-        let (is_running, is_paused) = {
+        let (is_running, is_paused, shutdown_requested) = {
             let muxer = muxer_state.lock();
-            (muxer.is_running, muxer.is_paused)
+            (muxer.is_running, muxer.is_paused, muxer.shutdown_requested)
         };
-        if !is_running {
+        if !is_running || shutdown_requested {
             break;
         }
         if is_paused {
@@ -569,19 +578,26 @@ async fn run_mux_queue(window: Window, state: AppStateType, muxer_state: Arc<Mut
                         continue;
                     }
 
-                    // Check pause/stop — drop guard before every await
+                    // Check pause/stop/shutdown — drop guard before every await.
+                    // Shutdown waits for the current file, then stops at this boundary.
                     loop {
-                        let (is_running, is_paused) = {
+                        let (is_running, is_paused, shutdown_requested) = {
                             let muxer = muxer_state.lock();
-                            (muxer.is_running, muxer.is_paused)
+                            (muxer.is_running, muxer.is_paused, muxer.shutdown_requested)
                         };
                         if !is_running {
                             return;
+                        }
+                        if shutdown_requested {
+                            break;
                         }
                         if !is_paused {
                             break;
                         }
                         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+                    }
+                    if muxer_state.lock().shutdown_requested {
+                        break;
                     }
 
                     // Determine output path
@@ -696,6 +712,36 @@ async fn run_mux_queue(window: Window, state: AppStateType, muxer_state: Arc<Mut
                     }
                 }
 
+                let shutdown_requested = muxer_state.lock().shutdown_requested;
+                if shutdown_requested && failed_files.is_empty() && processed_files < total_files {
+                    let progress = if total_files == 0 {
+                        0.0
+                    } else {
+                        (processed_files as f64 / total_files as f64) * 100.0
+                    };
+                    {
+                        let mut app_state = state.lock();
+                        if let Some(p) = app_state.queue.iter_mut().find(|p| p.id == project.id) {
+                            p.status = ProjectStatus::Paused;
+                            p.progress = progress;
+                            p.current_file = None;
+                            p.error = None;
+                        }
+                        persist_from_mux(&window, &app_state);
+                    }
+                    let _ = window.emit(
+                        "mux-progress",
+                        MuxProgress {
+                            project_id: project.id.clone(),
+                            progress,
+                            current_file: None,
+                            status: "paused".into(),
+                            error: None,
+                        },
+                    );
+                    break;
+                }
+
                 let error_message = if failed_files.is_empty() && processed_files == total_files {
                     None
                 } else {
@@ -752,14 +798,18 @@ async fn run_mux_queue(window: Window, state: AppStateType, muxer_state: Arc<Mut
                 );
             }
             None => {
-                // No more projects, stop muxing
-                let mut muxer = muxer_state.lock();
-                muxer.is_running = false;
+                // No more projects.
                 break;
             }
         }
     }
 
+    {
+        let mut muxer = muxer_state.lock();
+        muxer.is_running = false;
+        muxer.is_paused = false;
+        muxer.shutdown_requested = false;
+    }
     let _ = window.emit("mux-complete", ());
 }
 

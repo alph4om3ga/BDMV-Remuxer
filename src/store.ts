@@ -383,7 +383,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
     listen('mux-close-requested', async () => {
       await handleMuxCloseRequested(
         () => confirm(
-          'Muxing is still in progress. Close the app? Incomplete projects will be saved as Paused.',
+          'Muxing is still in progress. Close the app? The current file will finish first; remaining work will be saved as Paused.',
           { title: 'Muxing in progress', type: 'warning' },
         ),
         () => invoke('confirm_close'),

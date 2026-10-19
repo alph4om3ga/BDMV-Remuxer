@@ -1,6 +1,7 @@
 use crate::bdmv::Track;
 use crate::tool_error::format_tool_launch_error;
 use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
@@ -13,6 +14,7 @@ use tokio::process::Command;
 pub struct Muxer {
     pub is_running: bool,
     pub is_paused: bool,
+    pub shutdown_requested: bool,
 }
 
 // ============================================================================
@@ -47,9 +49,32 @@ pub struct MuxProgress {
 impl Muxer {
     /// Run mkvmerge for a single job, applying track language/name edits.
     pub async fn run_mkvmerge(mkvmerge_path: &str, job: &MuxJob) -> Result<(), String> {
+        let final_output_path = Path::new(&job.output_path);
+        let staged_output_path = staged_output_path(final_output_path);
+        if tokio::fs::try_exists(&staged_output_path)
+            .await
+            .map_err(|error| {
+                format!(
+                    "Failed to check for interrupted output {}: {}",
+                    staged_output_path.display(),
+                    error
+                )
+            })?
+        {
+            tokio::fs::remove_file(&staged_output_path)
+                .await
+                .map_err(|error| {
+                    format!(
+                        "Failed to remove interrupted output {}: {}",
+                        staged_output_path.display(),
+                        error
+                    )
+                })?;
+        }
+
         let mut cmd = Command::new(mkvmerge_path);
 
-        cmd.arg("-o").arg(&job.output_path);
+        cmd.arg("-o").arg(&staged_output_path);
 
         // Build track-order and language/name arguments
         // First pass: collect audio/subtitle track edits
@@ -142,21 +167,57 @@ impl Muxer {
             }
         }
 
-        let status = child.wait().await.map_err(|e| format!("mkvmerge wait error: {}", e))?;
+        let status = child
+            .wait()
+            .await
+            .map_err(|e| format!("mkvmerge wait error: {}", e))?;
 
         if status.success() || status.code() == Some(1) {
-            // mkvmerge returns 1 for warnings, which is still a success
-            Ok(())
+            // mkvmerge returns 1 for warnings, which is still a success.
+            promote_staged_output(&staged_output_path, final_output_path).await
         } else {
+            let _ = tokio::fs::remove_file(&staged_output_path).await;
             Err(format!("mkvmerge exited with code {:?}", status.code()))
         }
     }
 }
 
+fn staged_output_path(output_path: &Path) -> PathBuf {
+    let filename = output_path
+        .file_name()
+        .and_then(|filename| filename.to_str())
+        .unwrap_or("output.mkv");
+    output_path.with_file_name(format!(".{}.partial.mkv", filename))
+}
+
+async fn promote_staged_output(staged_path: &Path, output_path: &Path) -> Result<(), String> {
+    #[cfg(windows)]
+    if tokio::fs::try_exists(output_path).await.unwrap_or(false) {
+        tokio::fs::remove_file(output_path).await.map_err(|error| {
+            format!(
+                "Failed to replace output {}: {}",
+                output_path.display(),
+                error
+            )
+        })?;
+    }
+
+    tokio::fs::rename(staged_path, output_path)
+        .await
+        .map_err(|error| {
+            format!(
+                "Failed to finish output {}: {}",
+                output_path.display(),
+                error
+            )
+        })
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{MuxJob, Muxer};
+    use super::{staged_output_path, MuxJob, Muxer};
     use crate::bdmv::Track;
+    use std::fs;
     use std::path::PathBuf;
 
     #[tokio::test]
@@ -181,5 +242,83 @@ mod tests {
         assert!(error.contains("Settings"), "{error}");
         assert!(error.contains("MKVToolNix"), "{error}");
         assert!(error.contains(&path), "{error}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn successful_mux_replaces_stale_stage_and_promotes_complete_output() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let test_dir = std::env::temp_dir().join(format!(
+            "bdmv-remuxer-mux-test-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&test_dir).unwrap();
+        let tool_path = test_dir.join("fake-mkvmerge");
+        fs::write(
+            &tool_path,
+            "#!/bin/sh\nwhile [ \"$#\" -gt 0 ]; do\n  if [ \"$1\" = \"-o\" ]; then shift; out=\"$1\"; fi\n  shift\ndone\nprintf 'complete output' > \"$out\"\n",
+        )
+        .unwrap();
+        fs::set_permissions(&tool_path, fs::Permissions::from_mode(0o755)).unwrap();
+
+        let final_path = test_dir.join("episode.mkv");
+        fs::write(&final_path, "previous output").unwrap();
+        let staged_path = staged_output_path(&final_path);
+        fs::write(&staged_path, "interrupted output").unwrap();
+
+        let job = MuxJob {
+            input_path: "input.m2ts".into(),
+            output_path: final_path.to_string_lossy().to_string(),
+            chapter_path: None,
+            tracks: Vec::<Track>::new(),
+        };
+        Muxer::run_mkvmerge(&tool_path.to_string_lossy(), &job)
+            .await
+            .unwrap();
+
+        assert_eq!(fs::read_to_string(&final_path).unwrap(), "complete output");
+        assert!(!staged_path.exists());
+
+        fs::remove_dir_all(test_dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn failed_mux_discards_staged_output_and_preserves_existing_output() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let test_dir = std::env::temp_dir().join(format!(
+            "bdmv-remuxer-mux-test-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&test_dir).unwrap();
+        let tool_path = test_dir.join("fake-mkvmerge");
+        fs::write(
+            &tool_path,
+            "#!/bin/sh\nwhile [ \"$#\" -gt 0 ]; do\n  if [ \"$1\" = \"-o\" ]; then shift; out=\"$1\"; fi\n  shift\ndone\nprintf 'partial output' > \"$out\"\nexit 2\n",
+        )
+        .unwrap();
+        fs::set_permissions(&tool_path, fs::Permissions::from_mode(0o755)).unwrap();
+
+        let final_path = test_dir.join("episode.mkv");
+        fs::write(&final_path, "previous output").unwrap();
+        let staged_path = staged_output_path(&final_path);
+        let job = MuxJob {
+            input_path: "input.m2ts".into(),
+            output_path: final_path.to_string_lossy().to_string(),
+            chapter_path: None,
+            tracks: Vec::<Track>::new(),
+        };
+
+        assert!(Muxer::run_mkvmerge(&tool_path.to_string_lossy(), &job)
+            .await
+            .is_err());
+        assert_eq!(fs::read_to_string(&final_path).unwrap(), "previous output");
+        assert!(!staged_path.exists());
+
+        fs::remove_dir_all(test_dir).unwrap();
     }
 }
