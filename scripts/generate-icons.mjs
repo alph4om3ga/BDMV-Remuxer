@@ -10,6 +10,7 @@ const sourcePath = resolve(projectRoot, "src-tauri/icons/icon.svg");
 const tauriConfigPath = resolve(projectRoot, "src-tauri/tauri.conf.json");
 const tauriConfigDirectory = dirname(tauriConfigPath);
 const tauriCliPath = resolve(projectRoot, "node_modules/@tauri-apps/cli/tauri.js");
+const checkOnly = process.argv.includes("--check");
 const tempDirectory = await mkdtemp(join(tmpdir(), "bdmv-remuxer-icons-"));
 const rasterPath = join(tempDirectory, "icon.png");
 const generatedIconsPath = join(tempDirectory, "generated");
@@ -103,9 +104,30 @@ try {
   for (const iconPath of configuredIcons) {
     const generatedPath = join(generatedIconsPath, iconPath.split(/[\\/]/).at(-1));
     const destinationPath = resolve(tauriConfigDirectory, iconPath);
-    await mkdir(dirname(destinationPath), { recursive: true });
-    await copyFile(generatedPath, destinationPath);
-    console.log(`Updated ${iconPath}`);
+    if (checkOnly) {
+      let currentIcon;
+      try {
+        currentIcon = await readFile(destinationPath);
+      } catch (error) {
+        if (error.code !== "ENOENT") throw error;
+      }
+
+      const generatedIcon = await readFile(generatedPath);
+      if (!currentIcon || !currentIcon.equals(generatedIcon)) {
+        console.error(`Stale or missing Tauri icon: ${iconPath}`);
+        process.exitCode = 1;
+      } else {
+        console.log(`Fresh ${iconPath}`);
+      }
+    } else {
+      await mkdir(dirname(destinationPath), { recursive: true });
+      await copyFile(generatedPath, destinationPath);
+      console.log(`Updated ${iconPath}`);
+    }
+  }
+
+  if (checkOnly && process.exitCode === 1) {
+    throw new Error("Tauri icons are stale. Run `npm run icons:generate` to update them.");
   }
 } finally {
   await rm(tempDirectory, { recursive: true, force: true });

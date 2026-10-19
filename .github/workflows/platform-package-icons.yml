@@ -43,16 +43,8 @@ jobs:
           node-version: 20
           cache: npm
       - run: npm ci
-      - name: Regenerate icons from the SVG source
-        run: npm run icons:generate
-      - name: Ensure generated icons match the checked-in assets
-        shell: bash
-        run: |
-          if [ -n "$(git status --porcelain --untracked-files=all -- src-tauri/icons)" ]; then
-            git status --short --untracked-files=all -- src-tauri/icons
-            echo "::error::Regenerated platform icons differ from the checked-in Tauri assets."
-            exit 1
-          fi
+      - name: Check generated icons against the SVG source
+        run: npm run icons:check
 
   windows:
     name: Windows MSI install and launch

@@ -10,6 +10,7 @@
     "test:close-flow": "node --test src/muxCloseConfirmation.test.mjs",
     "test:settings-recovery": "node --test src/settingsRecoveryNotice.test.mjs",
     "icons:generate": "node scripts/generate-icons.mjs",
+    "icons:check": "node scripts/generate-icons.mjs --check",
     "icons:preview": "node scripts/preview-icons.mjs",
     "icons:verify": "node scripts/verify-platform-icons.mjs",
     "tauri": "tauri"
