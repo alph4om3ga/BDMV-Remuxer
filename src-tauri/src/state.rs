@@ -377,6 +377,19 @@ impl AppState {
         .save(config_dir)
     }
 
+    pub fn pause_incomplete_projects(&mut self) -> Result<(), String> {
+        for project in &mut self.queue {
+            if matches!(
+                project.status,
+                ProjectStatus::Pending | ProjectStatus::Processing
+            ) {
+                project.status = ProjectStatus::Paused;
+            }
+        }
+
+        self.persist_workspace()
+    }
+
     pub fn ensure_workspace_available(&self) -> Result<(), String> {
         if let Some(error) = &self.persistence_error {
             return Err(format!(
@@ -390,7 +403,10 @@ impl AppState {
 
 #[cfg(test)]
 mod tests {
-    use super::{settings_directory_for_config_root, AppState, Project, ProjectStatus, Settings};
+    use super::{
+        settings_directory_for_config_root, AppState, Project, ProjectStatus, Settings,
+        WorkspaceData,
+    };
     use crate::bdmv::{Track, Volume};
     use chrono::Utc;
     use std::collections::HashMap;
@@ -649,6 +665,42 @@ mod tests {
         );
         assert_eq!(restored.queue[0].first_unfinished_file_index(), Some(1));
         assert_eq!(restored.queue[0].completed_file_count(), 1);
+
+        std::fs::remove_dir_all(config_dir).unwrap();
+    }
+
+    #[test]
+    fn pausing_incomplete_projects_persists_before_close_and_keeps_completed_projects_complete() {
+        let config_dir = temporary_config_dir();
+        let make_project = |id: &str, status| Project {
+            id: id.into(),
+            output_name: id.into(),
+            output_path: "/output".into(),
+            volumes: Vec::new(),
+            track_templates: HashMap::new(),
+            status,
+            progress: 0.0,
+            current_file: None,
+            completed_files: Vec::new(),
+            created_at: Utc::now(),
+            error: None,
+        };
+        let mut state = AppState {
+            queue: vec![
+                make_project("pending", ProjectStatus::Pending),
+                make_project("processing", ProjectStatus::Processing),
+                make_project("complete", ProjectStatus::Complete),
+            ],
+            persistence_path: Some(config_dir.clone()),
+            ..AppState::default()
+        };
+
+        state.pause_incomplete_projects().unwrap();
+
+        let saved = WorkspaceData::load(&config_dir).unwrap();
+        assert_eq!(saved.queue[0].status, ProjectStatus::Paused);
+        assert_eq!(saved.queue[1].status, ProjectStatus::Paused);
+        assert_eq!(saved.queue[2].status, ProjectStatus::Complete);
 
         std::fs::remove_dir_all(config_dir).unwrap();
     }

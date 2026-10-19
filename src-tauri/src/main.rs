@@ -397,15 +397,7 @@ async fn confirm_close(
     }
     {
         let mut app_state = state.lock();
-        for project in &mut app_state.queue {
-            if matches!(
-                project.status,
-                ProjectStatus::Pending | ProjectStatus::Processing
-            ) {
-                project.status = ProjectStatus::Paused;
-            }
-        }
-        app_state.persist_workspace()?;
+        app_state.pause_incomplete_projects()?;
     }
 
     close_approval.store(true, Ordering::SeqCst);
@@ -809,6 +801,10 @@ async fn get_media_info(path: String) -> Result<MediaFile, String> {
         .map_err(|e| e.to_string())
 }
 
+fn should_intercept_close(is_running: bool, close_was_approved: bool) -> bool {
+    is_running && !close_was_approved
+}
+
 // ============================================================================
 // Main
 // ============================================================================
@@ -874,11 +870,9 @@ fn main() {
         ])
         .on_window_event(move |event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event.event() {
-                if close_approval.swap(false, Ordering::SeqCst) {
-                    return;
-                }
+                let close_was_approved = close_approval.swap(false, Ordering::SeqCst);
                 let muxer_state = event.window().state::<Arc<Mutex<Muxer>>>();
-                if muxer_state.lock().is_running {
+                if should_intercept_close(muxer_state.lock().is_running, close_was_approved) {
                     api.prevent_close();
                     let _ = event.window().emit("mux-close-requested", ());
                 }
@@ -886,6 +880,18 @@ fn main() {
         })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod close_tests {
+    use super::should_intercept_close;
+
+    #[test]
+    fn close_is_intercepted_only_while_muxing_without_prior_approval() {
+        assert!(!should_intercept_close(false, false));
+        assert!(should_intercept_close(true, false));
+        assert!(!should_intercept_close(true, true));
+    }
 }
 
 fn settings_config_dir() -> Result<PathBuf, String> {

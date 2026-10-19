@@ -3,6 +3,7 @@ import { invoke } from '@tauri-apps/api/tauri';
 import { confirm, open } from '@tauri-apps/api/dialog';
 import { listen } from '@tauri-apps/api/event';
 import type { Volume, Project, Settings, Track, FileCategory } from './types';
+import { handleMuxCloseRequested } from './muxCloseConfirmation.js';
 
 interface MuxerStatus {
   is_running: boolean;
@@ -335,16 +336,14 @@ export const useAppStore = create<AppStore>((set, get) => ({
     });
 
     listen('mux-close-requested', async () => {
-      const shouldClose = await confirm(
-        'Muxing is still in progress. Close the app? Incomplete projects will be saved as Paused.',
-        { title: 'Muxing in progress', type: 'warning' },
+      await handleMuxCloseRequested(
+        () => confirm(
+          'Muxing is still in progress. Close the app? Incomplete projects will be saved as Paused.',
+          { title: 'Muxing in progress', type: 'warning' },
+        ),
+        () => invoke('confirm_close'),
+        (error) => set({ error }),
       );
-      if (!shouldClose) return;
-      try {
-        await invoke('confirm_close');
-      } catch (e) {
-        set({ error: String(e) });
-      }
     });
   },
 }));
