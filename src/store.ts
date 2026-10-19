@@ -2,6 +2,7 @@ import { create } from 'zustand';
 import { invoke } from '@tauri-apps/api/tauri';
 import { confirm, open } from '@tauri-apps/api/dialog';
 import { listen } from '@tauri-apps/api/event';
+import { retryProjectWithQueue } from './retryProject.js';
 import type {
   Volume,
   Project,
@@ -241,15 +242,15 @@ export const useAppStore = create<AppStore>((set, get) => ({
 
   retryProject: async (projectId) => {
     try {
-      const project = await invoke<Project>('retry_project', { projectId });
-      set(state => ({
-        error: null,
-        queue: state.queue.map(item => item.id === project.id ? project : item),
-      }));
-
-      if (!get().muxerStatus.is_running) {
-        await get().startMuxing();
-      }
+      await retryProjectWithQueue(projectId, {
+        retry: (id) => invoke<Project>('retry_project', { projectId: id }),
+        startMuxing: () => get().startMuxing(),
+        getMuxerStatus: () => get().muxerStatus,
+        onRetry: (project) => set(state => ({
+          error: null,
+          queue: state.queue.map(item => item.id === project.id ? project : item),
+        })),
+      });
     } catch (e) {
       set({ error: String(e) });
     }

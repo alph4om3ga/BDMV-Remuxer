@@ -312,6 +312,13 @@ async fn retry_project(
     state: State<'_, AppStateType>,
 ) -> Result<Project, String> {
     let mut app_state = state.lock();
+    let retried_project = prepare_project_retry(&mut app_state, &project_id)?;
+
+    app_state.persist_workspace()?;
+    Ok(retried_project)
+}
+
+fn prepare_project_retry(app_state: &mut AppState, project_id: &str) -> Result<Project, String> {
     let project = app_state
         .queue
         .iter_mut()
@@ -323,10 +330,7 @@ async fn retry_project(
     }
 
     project.prepare_retry();
-    let retried_project = project.clone();
-
-    app_state.persist_workspace()?;
-    Ok(retried_project)
+    Ok(project.clone())
 }
 
 #[tauri::command]
@@ -381,9 +385,7 @@ async fn start_muxing(
 ) -> Result<(), String> {
     let mut muxer = muxer_state.lock();
 
-    if muxer.is_running {
-        return Err("Muxer is already running".into());
-    }
+    ensure_muxer_idle(&muxer)?;
 
     {
         let mut app_state = state.lock();
@@ -408,6 +410,31 @@ async fn start_muxing(
     });
 
     Ok(())
+}
+
+fn ensure_muxer_idle(muxer: &Muxer) -> Result<(), String> {
+    if muxer.is_running {
+        Err("Muxer is already running".into())
+    } else {
+        Ok(())
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum QueueAction {
+    Stop,
+    Wait,
+    Process,
+}
+
+fn queue_action(is_running: bool, is_paused: bool, shutdown_requested: bool) -> QueueAction {
+    if !is_running || shutdown_requested {
+        QueueAction::Stop
+    } else if is_paused {
+        QueueAction::Wait
+    } else {
+        QueueAction::Process
+    }
 }
 
 #[tauri::command]
@@ -487,17 +514,18 @@ struct MuxerStatus {
 
 async fn run_mux_queue(window: Window, state: AppStateType, muxer_state: Arc<Mutex<Muxer>>) {
     loop {
-        // Check if we should stop or wait (drop guard before any await)
-        let (is_running, is_paused, shutdown_requested) = {
+        // Check if we should stop or wait (drop guard before any await).
+        let action = {
             let muxer = muxer_state.lock();
-            (muxer.is_running, muxer.is_paused, muxer.shutdown_requested)
+            queue_action(muxer.is_running, muxer.is_paused, muxer.shutdown_requested)
         };
-        if !is_running || shutdown_requested {
-            break;
-        }
-        if is_paused {
-            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-            continue;
+        match action {
+            QueueAction::Stop => break,
+            QueueAction::Wait => {
+                tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+                continue;
+            }
+            QueueAction::Process => {}
         }
 
         // Get next pending project
@@ -1401,6 +1429,147 @@ mod close_tests {
         assert_eq!(saved_workspace["queue"][0]["status"], "paused");
 
         fs::remove_dir_all(config_dir).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod queue_retry_tests {
+    use super::{ensure_muxer_idle, prepare_project_retry, queue_action, QueueAction};
+    use crate::bdmv::{MediaFile, Volume};
+    use crate::muxer::Muxer;
+    use crate::state::{AppState, CompletedFile, Project, ProjectStatus};
+    use chrono::Utc;
+    use std::collections::HashMap;
+
+    fn retry_state() -> AppState {
+        let successful_path = "/disc/BDMV/STREAM/00001.m2ts";
+        let remaining_path = "/disc/BDMV/STREAM/00002.m2ts";
+        let make_file = |filename: &str, path: &str| MediaFile {
+            id: filename.into(),
+            filename: filename.into(),
+            path: path.into(),
+            duration: 0.0,
+            size: 0,
+            category: "EPISODE".into(),
+            tracks: Vec::new(),
+            episode_number: None,
+            op_number: None,
+            ed_number: None,
+            special_number: None,
+            chapter_file: None,
+        };
+        let mut state = AppState::default();
+        state.queue.push(Project {
+            id: "active-project".into(),
+            output_name: "Active".into(),
+            output_path: "/output".into(),
+            volumes: Vec::new(),
+            track_templates: HashMap::new(),
+            status: ProjectStatus::Processing,
+            progress: 0.0,
+            current_file: Some("active.m2ts".into()),
+            completed_files: Vec::new(),
+            created_at: Utc::now(),
+            error: None,
+        });
+        state.queue.push(Project {
+            id: "failed-project".into(),
+            output_name: "Retry me".into(),
+            output_path: "/output".into(),
+            volumes: vec![Volume {
+                id: "volume-1".into(),
+                name: "Disc 1".into(),
+                volume_number: 1,
+                files: vec![
+                    make_file("00001.m2ts", successful_path),
+                    make_file("00002.m2ts", remaining_path),
+                ],
+                probe_failures: Vec::new(),
+            }],
+            track_templates: HashMap::new(),
+            status: ProjectStatus::Error,
+            progress: 50.0,
+            current_file: Some("00002.m2ts".into()),
+            completed_files: vec![CompletedFile {
+                path: successful_path.into(),
+                fingerprint: Some("successful-file-fingerprint".into()),
+            }],
+            created_at: Utc::now(),
+            error: Some("mux failed".into()),
+        });
+        state
+    }
+
+    fn assert_retry_keeps_successful_files(state: &mut AppState) {
+        let retried = prepare_project_retry(state, "failed-project").unwrap();
+        assert_eq!(retried.status, ProjectStatus::Pending);
+        assert_eq!(retried.current_file, None);
+        assert_eq!(retried.error, None);
+        assert_eq!(
+            retried.completed_files,
+            vec![CompletedFile {
+                path: "/disc/BDMV/STREAM/00001.m2ts".into(),
+                fingerprint: Some("successful-file-fingerprint".into()),
+            }]
+        );
+        assert_eq!(
+            state.queue[1].completed_files,
+            retried.completed_files,
+            "the queued project must retain the same successful-file markers"
+        );
+        assert_eq!(state.queue[1].progress, 50.0);
+    }
+
+    #[test]
+    fn retry_while_another_project_is_running_does_not_start_a_second_runner() {
+        let mut state = retry_state();
+        let mut muxer = Muxer {
+            is_running: true,
+            is_paused: false,
+            shutdown_requested: false,
+        };
+
+        assert_retry_keeps_successful_files(&mut state);
+        assert_eq!(
+            queue_action(muxer.is_running, muxer.is_paused, muxer.shutdown_requested),
+            QueueAction::Process
+        );
+        assert_eq!(
+            ensure_muxer_idle(&muxer).unwrap_err(),
+            "Muxer is already running"
+        );
+        muxer.is_running = false;
+        assert_eq!(ensure_muxer_idle(&muxer), Ok(()));
+    }
+
+    #[test]
+    fn retry_while_paused_waits_for_resume_and_preserves_successful_files() {
+        let mut state = retry_state();
+        let mut muxer = Muxer {
+            is_running: true,
+            is_paused: true,
+            shutdown_requested: false,
+        };
+
+        assert_retry_keeps_successful_files(&mut state);
+        assert_eq!(
+            queue_action(muxer.is_running, muxer.is_paused, muxer.shutdown_requested),
+            QueueAction::Wait
+        );
+        assert_eq!(
+            ensure_muxer_idle(&muxer).unwrap_err(),
+            "Muxer is already running"
+        );
+
+        muxer.is_paused = false;
+        assert_eq!(
+            queue_action(muxer.is_running, muxer.is_paused, muxer.shutdown_requested),
+            QueueAction::Process
+        );
+        assert_eq!(
+            ensure_muxer_idle(&muxer).unwrap_err(),
+            "Muxer is already running"
+        );
     }
 }
 
