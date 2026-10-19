@@ -8,11 +8,11 @@ export function getSettingsLoadUpdate(response) {
   };
 }
 
-export function getSettingsSaveSuccessUpdate(settings) {
+export function getSettingsSaveSuccessUpdate(settings, recoveryWarning = null) {
   return {
     settings,
     error: null,
-    recoveryWarning: null,
+    recoveryWarning,
     recoveryBackupAvailable: false,
     settingsSaveAllowed: true,
     recoveryBackupOpenError: null,

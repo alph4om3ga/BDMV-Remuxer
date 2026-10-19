@@ -14,10 +14,13 @@ export function getSettingsLoadUpdate(response: SettingsResponse): {
   settingsSaveAllowed: boolean;
   recoveryBackupOpenError: null;
 };
-export function getSettingsSaveSuccessUpdate(settings: Settings): {
+export function getSettingsSaveSuccessUpdate(
+  settings: Settings,
+  recoveryWarning?: string | null,
+): {
   settings: Settings;
   error: null;
-  recoveryWarning: null;
+  recoveryWarning: string | null;
   recoveryBackupAvailable: false;
   settingsSaveAllowed: true;
   recoveryBackupOpenError: null;

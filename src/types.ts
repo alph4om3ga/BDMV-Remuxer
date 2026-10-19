@@ -67,6 +67,7 @@ export interface Project {
 // ============================================================================
 
 export interface Settings {
+  [key: string]: unknown;
   mkvmerge_path: string;
   ffprobe_path: string;
   min_episode_duration: number;

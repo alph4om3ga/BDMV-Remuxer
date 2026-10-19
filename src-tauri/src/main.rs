@@ -934,7 +934,7 @@ async fn preview_settings_recovery_backup(
 async fn restore_settings_recovery_backup(
     expected_source_hash: String,
     state: State<'_, AppStateType>,
-) -> Result<Settings, String> {
+) -> Result<SettingsSaveResponse, String> {
     let backup_path = {
         let app_state = state.lock();
         app_state.ensure_settings_savable()?;
@@ -951,23 +951,40 @@ async fn restore_settings_recovery_backup(
         );
     }
     let config_dir = settings_config_dir()?;
-    preview.settings.save_to_config_dir(&config_dir)?;
+    let saved_settings = preview.settings.save_to_config_dir(&config_dir)?;
 
     let mut app_state = state.lock();
-    app_state.settings = preview.settings.clone();
-    app_state.set_settings_recovery(None, None, true);
-    Ok(preview.settings)
+    app_state.settings = saved_settings.clone();
+    let warning = saved_settings.unrecognized_fields_warning();
+    app_state.set_settings_recovery(warning.clone(), None, true);
+    Ok(SettingsSaveResponse {
+        settings: saved_settings,
+        recovery_warning: warning,
+    })
 }
 
 #[tauri::command]
-async fn save_settings(settings: Settings, state: State<'_, AppStateType>) -> Result<(), String> {
+async fn save_settings(
+    settings: Settings,
+    state: State<'_, AppStateType>,
+) -> Result<SettingsSaveResponse, String> {
     let mut app_state = state.lock();
     app_state.ensure_settings_savable()?;
     let config_dir = settings_config_dir()?;
-    settings.save_to_config_dir(&config_dir)?;
-    app_state.settings = settings;
-    app_state.set_settings_recovery(None, None, true);
-    Ok(())
+    let saved_settings = settings.save_to_config_dir(&config_dir)?;
+    let warning = saved_settings.unrecognized_fields_warning();
+    app_state.settings = saved_settings.clone();
+    app_state.set_settings_recovery(warning.clone(), None, true);
+    Ok(SettingsSaveResponse {
+        settings: saved_settings,
+        recovery_warning: warning,
+    })
+}
+
+#[derive(Serialize)]
+struct SettingsSaveResponse {
+    settings: Settings,
+    recovery_warning: Option<String>,
 }
 
 #[tauri::command]

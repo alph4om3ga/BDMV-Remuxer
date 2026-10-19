@@ -122,3 +122,38 @@ test('settings save is enabled when the damaged preferences were preserved', () 
   assert.equal(saveState.disabled, false);
   assert.equal(saveState.warning, null);
 });
+
+test('newer-version preference warnings are shown while known settings remain savable', () => {
+  const warning = 'These preferences include settings from a newer version: future_preference. Update the app before changing them; this version preserves them when saving known settings.';
+  const state = applyUpdate({
+    error: null,
+    recoveryWarning: null,
+    recoveryBackupAvailable: false,
+    settingsSaveAllowed: false,
+  }, getSettingsLoadUpdate({
+    settings: { ...settings, future_preference: { enabled: true } },
+    recovery_warning: warning,
+    recovery_backup_available: false,
+    settings_save_allowed: true,
+  }));
+
+  assert.equal(state.settingsSaveAllowed, true);
+  assert.equal(getSettingsSaveState(state.settingsSaveAllowed, state.recoveryWarning).disabled, false);
+  assert.equal(getVisibleNotice(state.recoveryWarning, state.error), warning);
+  assert.deepEqual(state.settings.future_preference, { enabled: true });
+});
+
+test('saving settings keeps a newer-version warning and the returned preserved settings', () => {
+  const warning = 'These preferences contain future_preference from a newer version.';
+  const savedSettings = { ...settings, future_preference: { enabled: true } };
+  const state = applyUpdate({
+    error: 'previous save failed',
+    recoveryWarning: null,
+    recoveryBackupAvailable: false,
+  }, getSettingsSaveSuccessUpdate(savedSettings, warning));
+
+  assert.equal(state.settings, savedSettings);
+  assert.equal(state.recoveryWarning, warning);
+  assert.equal(getVisibleNotice(state.recoveryWarning, state.error), warning);
+  assert.equal(state.settingsSaveAllowed, true);
+});

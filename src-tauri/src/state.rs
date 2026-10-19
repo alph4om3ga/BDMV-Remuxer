@@ -2,7 +2,7 @@ use crate::bdmv::{Track, Volume};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs::{self, OpenOptions};
 use std::io::{ErrorKind, Read, Write};
 use std::path::{Path, PathBuf};
@@ -27,6 +27,8 @@ pub struct Settings {
     pub op_ed_max_duration: i64,
     pub episode_folder_name: String,
     pub extra_folder_name: String,
+    #[serde(flatten)]
+    pub unrecognized: BTreeMap<String, serde_json::Value>,
 }
 
 impl Default for Settings {
@@ -40,6 +42,7 @@ impl Default for Settings {
             op_ed_max_duration: 110,
             episode_folder_name: "Episode".into(),
             extra_folder_name: "Extra".into(),
+            unrecognized: BTreeMap::new(),
         }
     }
 }
@@ -85,9 +88,12 @@ impl Settings {
                 recognized_fields += 1;
             } else {
                 warnings.push(format!(
-                    "Unrecognized preference '{}' will be ignored.",
+                    "Unrecognized preference '{}' will be preserved.",
                     name
                 ));
+                settings
+                    .unrecognized
+                    .insert(name.clone(), object[name].clone());
             }
         }
 
@@ -174,10 +180,10 @@ impl Settings {
     pub fn load_with_recovery(config_dir: &Path) -> SettingsLoadOutcome {
         let path = config_dir.join(Self::FILE_NAME);
         match fs::read(&path) {
-            Ok(contents) => match serde_json::from_slice(&contents) {
+            Ok(contents) => match serde_json::from_slice::<Self>(&contents) {
                 Ok(settings) => SettingsLoadOutcome {
+                    recovery_warning: settings.unrecognized_fields_warning(),
                     settings,
-                    recovery_warning: None,
                     recovery_backup_path: None,
                     can_save: true,
                 },
@@ -229,7 +235,7 @@ impl Settings {
         }
     }
 
-    pub fn save_to_config_dir(&self, config_dir: &Path) -> Result<(), String> {
+    pub fn save_to_config_dir(&self, config_dir: &Path) -> Result<Self, String> {
         fs::create_dir_all(config_dir).map_err(|error| {
             format!(
                 "Failed to create settings directory {}: {}",
@@ -239,9 +245,53 @@ impl Settings {
         })?;
 
         let path = config_dir.join(Self::FILE_NAME);
-        let contents = serde_json::to_vec_pretty(self)
+        let mut settings_to_save = self.clone();
+        settings_to_save.merge_unrecognized_from_existing_file(&path)?;
+        let contents = serde_json::to_vec_pretty(&settings_to_save)
             .map_err(|error| format!("Failed to serialize settings: {}", error))?;
-        write_settings_atomically(&path, &contents)
+        write_settings_atomically(&path, &contents)?;
+        Ok(settings_to_save)
+    }
+
+    pub fn unrecognized_fields_warning(&self) -> Option<String> {
+        if self.unrecognized.is_empty() {
+            return None;
+        }
+
+        Some(format!(
+            "These preferences include settings from a newer version of BDMV Remuxer that this version does not recognize: {}. Update BDMV Remuxer before changing or removing those settings. This version will preserve them when you save recognized settings.",
+            self.unrecognized.keys().cloned().collect::<Vec<_>>().join(", ")
+        ))
+    }
+
+    fn merge_unrecognized_from_existing_file(&mut self, path: &Path) -> Result<(), String> {
+        let contents = match fs::read(path) {
+            Ok(contents) => contents,
+            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(()),
+            Err(error) => {
+                return Err(format!(
+                    "Could not inspect existing preferences at {} before saving: {}",
+                    path.display(),
+                    error
+                ))
+            }
+        };
+        let Ok(value) = serde_json::from_slice::<serde_json::Value>(&contents) else {
+            // A damaged file may be reset after startup has preserved a recovery copy.
+            return Ok(());
+        };
+        let Some(object) = value.as_object() else {
+            return Ok(());
+        };
+
+        for (name, value) in object {
+            if !Self::RECOVERY_FIELD_NAMES.contains(&name.as_str()) {
+                // Prefer the latest on-disk value if another app version changed it
+                // after this instance loaded its settings.
+                self.unrecognized.insert(name.clone(), value.clone());
+            }
+        }
+        Ok(())
     }
 }
 
@@ -911,6 +961,79 @@ mod tests {
     }
 
     #[test]
+    fn newer_settings_are_reported_and_unknown_values_survive_known_field_edits() {
+        let config_dir = temporary_config_dir();
+        std::fs::create_dir_all(&config_dir).unwrap();
+        let settings_path = config_dir.join("settings.json");
+        let newer_value = serde_json::json!({
+            "mode": "preserve",
+            "flags": [true, false]
+        });
+        std::fs::write(
+            &settings_path,
+            serde_json::to_vec(&serde_json::json!({
+                "mkvmerge_path": "/tools/newer-mkvmerge",
+                "future_preference": newer_value,
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let outcome = Settings::load_with_recovery(&config_dir);
+        let warning = outcome.recovery_warning.as_deref().unwrap();
+        assert!(warning.contains("newer version of BDMV Remuxer"));
+        assert!(warning.contains("future_preference"));
+        assert!(warning.contains("Update BDMV Remuxer"));
+        assert!(warning.contains("preserve them"));
+        assert!(outcome.can_save);
+
+        let mut edited_settings = outcome.settings;
+        edited_settings.mkvmerge_path = "/tools/edited-mkvmerge".into();
+        let saved_settings = edited_settings.save_to_config_dir(&config_dir).unwrap();
+        let saved_json: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&settings_path).unwrap()).unwrap();
+
+        assert_eq!(saved_settings.mkvmerge_path, "/tools/edited-mkvmerge");
+        assert_eq!(saved_json["future_preference"]["mode"], "preserve");
+        assert_eq!(
+            saved_json["future_preference"]["flags"],
+            serde_json::json!([true, false])
+        );
+        assert!(saved_settings
+            .unrecognized_fields_warning()
+            .unwrap()
+            .contains("future_preference"));
+
+        std::fs::remove_dir_all(config_dir).unwrap();
+    }
+
+    #[test]
+    fn settings_save_preserves_unknown_values_added_after_the_app_loaded_preferences() {
+        let config_dir = temporary_config_dir();
+        std::fs::create_dir_all(&config_dir).unwrap();
+        let settings_path = config_dir.join("settings.json");
+        std::fs::write(&settings_path, r#"{"mkvmerge_path":"mkvmerge"}"#).unwrap();
+        let mut settings = Settings::load_with_recovery(&config_dir).settings;
+
+        std::fs::write(
+            &settings_path,
+            r#"{"mkvmerge_path":"newer-app-value","newer_flag":{"enabled":true}}"#,
+        )
+        .unwrap();
+        settings.ffprobe_path = "/tools/ffprobe".into();
+
+        let saved = settings.save_to_config_dir(&config_dir).unwrap();
+        let saved_json: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&settings_path).unwrap()).unwrap();
+
+        assert_eq!(saved.ffprobe_path, "/tools/ffprobe");
+        assert_eq!(saved_json["newer_flag"]["enabled"], true);
+        assert_eq!(saved.unrecognized["newer_flag"]["enabled"], true);
+
+        std::fs::remove_dir_all(config_dir).unwrap();
+    }
+
+    #[test]
     fn malformed_settings_are_preserved_and_defaults_can_be_saved_as_a_reset() {
         let config_dir = temporary_config_dir();
         std::fs::create_dir_all(&config_dir).unwrap();
@@ -1033,6 +1156,14 @@ mod tests {
             .warnings
             .iter()
             .any(|warning| warning.contains("unexpected_setting")));
+        assert_eq!(
+            preview.settings.unrecognized["unexpected_setting"],
+            serde_json::json!(true)
+        );
+        assert!(preview
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("will be preserved")));
         assert_eq!(std::fs::read(&backup_path).unwrap(), backup_contents);
 
         std::fs::remove_dir_all(config_dir).unwrap();

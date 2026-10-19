@@ -339,11 +339,14 @@ export const useAppStore = create<AppStore>((set, get) => ({
 
     set({ isRestoringRecoveryBackup: true, recoveryRestoreError: null });
     try {
-      const settings = await invoke<Settings>('restore_settings_recovery_backup', {
+      const response = await invoke<{
+        settings: Settings;
+        recovery_warning: string | null;
+      }>('restore_settings_recovery_backup', {
         expectedSourceHash: preview.source_hash,
       });
       set({
-        ...getSettingsSaveSuccessUpdate(settings),
+        ...getSettingsSaveSuccessUpdate(response.settings, response.recovery_warning),
         recoveryRestorePreview: null,
         recoveryRestoreError: null,
         isRestoringRecoveryBackup: false,
@@ -367,8 +370,11 @@ export const useAppStore = create<AppStore>((set, get) => ({
 
   saveSettings: async (settings) => {
     try {
-      await invoke('save_settings', { settings });
-      set(getSettingsSaveSuccessUpdate(settings));
+      const response = await invoke<{
+        settings: Settings;
+        recovery_warning: string | null;
+      }>('save_settings', { settings });
+      set(getSettingsSaveSuccessUpdate(response.settings, response.recovery_warning));
       return true;
     } catch (e) {
       set(getSettingsSaveFailureUpdate(e));
