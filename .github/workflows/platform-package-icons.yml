@@ -6,6 +6,7 @@ on:
       - ".github/workflows/platform-package-icons.yml"
       - "package.json"
       - "package-lock.json"
+      - "scripts/generate-icons.mjs"
       - "index.html"
       - "scripts/verify-platform-icons.mjs"
       - "scripts/smoke-macos-window.swift"
@@ -19,6 +20,7 @@ on:
       - ".github/workflows/platform-package-icons.yml"
       - "package.json"
       - "package-lock.json"
+      - "scripts/generate-icons.mjs"
       - "index.html"
       - "scripts/verify-platform-icons.mjs"
       - "scripts/smoke-macos-window.swift"
@@ -31,6 +33,27 @@ permissions:
   contents: read
 
 jobs:
+  generated-icons:
+    name: Verify generated platform icons
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - name: Regenerate icons from the SVG source
+        run: npm run icons:generate
+      - name: Ensure generated icons match the checked-in assets
+        shell: bash
+        run: |
+          if [ -n "$(git status --porcelain --untracked-files=all -- src-tauri/icons)" ]; then
+            git status --short --untracked-files=all -- src-tauri/icons
+            echo "::error::Regenerated platform icons differ from the checked-in Tauri assets."
+            exit 1
+          fi
+
   windows:
     name: Windows MSI install and launch
     runs-on: windows-latest
