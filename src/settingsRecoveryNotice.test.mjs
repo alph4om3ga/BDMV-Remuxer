@@ -50,7 +50,10 @@ test('the recovery warning remains visible after a failed settings save', () => 
   const afterFailedSave = applyUpdate(recovered, getSettingsSaveFailureUpdate('settings are read-only'));
 
   assert.equal(afterFailedSave.error, 'settings are read-only');
-  assert.equal(getVisibleNotice(afterFailedSave.recoveryWarning, afterFailedSave.error), recoveryWarning);
+  assert.equal(
+    getVisibleNotice(afterFailedSave.recoveryWarning, afterFailedSave.error),
+    `${recoveryWarning} settings are read-only`,
+  );
   assert.equal(isRecoveryBackupVisible(afterFailedSave.recoveryWarning, afterFailedSave.recoveryBackupAvailable), true);
 });
 
@@ -60,6 +63,10 @@ test('a failed backup-open action is visible without hiding recovery guidance', 
   assert.equal(
     getVisibleNotice(recoveryWarning, null, openError),
     `${recoveryWarning} ${openError}`,
+  );
+  assert.equal(
+    getVisibleNotice(recoveryWarning, 'settings are read-only', openError),
+    `${recoveryWarning} settings are read-only ${openError}`,
   );
   assert.equal(getVisibleNotice(null, null, openError), openError);
 });

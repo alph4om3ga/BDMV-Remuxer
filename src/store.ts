@@ -75,7 +75,7 @@ interface AppStore {
   dismissRecoveryRestorePreview: () => void;
   dismissRecoveryWarning: () => void;
   dismissRecoveryBackupOpenError: () => void;
-  saveSettings: (settings: Settings) => Promise<void>;
+  saveSettings: (settings: Settings) => Promise<boolean>;
   loadQueue: () => Promise<void>;
   loadCurrentVolumes: () => Promise<void>;
   loadTrackTemplates: () => Promise<void>;
@@ -369,8 +369,10 @@ export const useAppStore = create<AppStore>((set, get) => ({
     try {
       await invoke('save_settings', { settings });
       set(getSettingsSaveSuccessUpdate(settings));
+      return true;
     } catch (e) {
       set(getSettingsSaveFailureUpdate(e));
+      return false;
     }
   },
 

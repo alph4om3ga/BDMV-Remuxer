@@ -359,11 +359,17 @@ const SettingsModal: React.FC<SettingsModalProps> = ({
   const { saveSettings } = useAppStore();
   const [settings, setSettings] = useState<SettingsType>(initialSettings);
   const [browseError, setBrowseError] = useState<string | null>(null);
+  const [saveError, setSaveError] = useState<string | null>(null);
   const saveState = getSettingsSaveState(settingsSaveAllowed, recoveryWarning);
   
   const handleSave = async () => {
-    await saveSettings(settings);
-    onClose();
+    setSaveError(null);
+    const saved = await saveSettings(settings);
+    if (saved) {
+      onClose();
+    } else {
+      setSaveError(useAppStore.getState().error || 'Settings could not be saved.');
+    }
   };
 
   const browseForExecutable = async (setting: 'mkvmerge_path' | 'ffprobe_path', title: string) => {
@@ -386,8 +392,13 @@ const SettingsModal: React.FC<SettingsModalProps> = ({
           <button className="modal-close" onClick={onClose}><X size={20} /></button>
         </div>
         <div className="modal-body settings-panel">
-          {saveState.warning && (
-            <p className="settings-error" role="alert">{saveState.warning}</p>
+          {(saveState.warning || recoveryWarning) && (
+            <p className="settings-error" role={saveState.warning ? 'alert' : 'status'}>
+              {saveState.warning || recoveryWarning}
+            </p>
+          )}
+          {saveError && (
+            <p className="settings-error" role="alert">{saveError}</p>
           )}
           <div className="settings-group">
             <h4>Tools</h4>

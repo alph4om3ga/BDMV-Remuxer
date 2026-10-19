@@ -38,11 +38,10 @@ export function getRecoveryWarningDismissUpdate() {
 }
 
 export function getVisibleNotice(recoveryWarning, error, recoveryBackupOpenError = null) {
-  const notice = recoveryWarning || error;
-  if (recoveryWarning && recoveryBackupOpenError) {
-    return `${recoveryWarning} ${recoveryBackupOpenError}`;
-  }
-  return notice || recoveryBackupOpenError;
+  const notices = [recoveryWarning, error, recoveryBackupOpenError]
+    .filter(Boolean)
+    .filter((notice, index, allNotices) => allNotices.indexOf(notice) === index);
+  return notices.length > 0 ? notices.join(' ') : null;
 }
 
 export function isRecoveryBackupVisible(recoveryWarning, recoveryBackupAvailable) {
