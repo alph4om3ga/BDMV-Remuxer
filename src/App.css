@@ -786,6 +786,12 @@ input:focus, select:focus {
   flex-shrink: 0;
 }
 
+.settings-error {
+  margin-top: 10px;
+  color: var(--danger);
+  font-size: 12px;
+}
+
 /* ============================================================================
    Template Editor
    ============================================================================ */

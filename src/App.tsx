@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { useAppStore } from './store';
+import { open } from '@tauri-apps/api/dialog';
 import { 
   FolderOpen, Play, Pause, Settings, ChevronRight, ChevronDown, 
   Film, Tv, Music, Star, AlertTriangle, Check, X, Edit3, 
@@ -326,10 +327,23 @@ interface SettingsModalProps {
 const SettingsModal: React.FC<SettingsModalProps> = ({ settings: initialSettings, onClose }) => {
   const { saveSettings } = useAppStore();
   const [settings, setSettings] = useState<SettingsType>(initialSettings);
+  const [browseError, setBrowseError] = useState<string | null>(null);
   
   const handleSave = async () => {
     await saveSettings(settings);
     onClose();
+  };
+
+  const browseForExecutable = async (setting: 'mkvmerge_path' | 'ffprobe_path', title: string) => {
+    try {
+      const selected = await open({ title, multiple: false, directory: false });
+      if (typeof selected === 'string') {
+        setSettings(current => ({ ...current, [setting]: selected }));
+      }
+      setBrowseError(null);
+    } catch (error) {
+      setBrowseError(`Could not open the file picker: ${String(error)}`);
+    }
   };
   
   return (
@@ -353,8 +367,15 @@ const SettingsModal: React.FC<SettingsModalProps> = ({ settings: initialSettings
                   type="text"
                   value={settings.mkvmerge_path}
                   onChange={e => setSettings({ ...settings, mkvmerge_path: e.target.value })}
-                  style={{ width: '300px' }}
+                  style={{ width: '220px' }}
                 />
+                <button
+                  className="btn secondary"
+                  onClick={() => browseForExecutable('mkvmerge_path', 'Select mkvmerge executable')}
+                  aria-label="Browse for mkvmerge executable"
+                >
+                  <FolderOpen size={15} /> Browse
+                </button>
               </div>
             </div>
             
@@ -368,10 +389,18 @@ const SettingsModal: React.FC<SettingsModalProps> = ({ settings: initialSettings
                   type="text"
                   value={settings.ffprobe_path}
                   onChange={e => setSettings({ ...settings, ffprobe_path: e.target.value })}
-                  style={{ width: '300px' }}
+                  style={{ width: '220px' }}
                 />
+                <button
+                  className="btn secondary"
+                  onClick={() => browseForExecutable('ffprobe_path', 'Select ffprobe executable')}
+                  aria-label="Browse for ffprobe executable"
+                >
+                  <FolderOpen size={15} /> Browse
+                </button>
               </div>
             </div>
+            {browseError && <p className="settings-error" role="alert">{browseError}</p>}
           </div>
           
           <div className="settings-group">
