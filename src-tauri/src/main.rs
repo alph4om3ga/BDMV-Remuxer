@@ -15,6 +15,7 @@ use crate::state::{
 use parking_lot::Mutex;
 use serde::Serialize;
 use std::collections::HashMap;
+use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -545,6 +546,38 @@ struct MuxerStatus {
     is_paused: bool,
 }
 
+async fn remux_and_mark_file_completed<F, Fut>(
+    project: &mut Project,
+    source_path: &str,
+    remux: F,
+) -> Result<String, String>
+where
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = Result<(), String>>,
+{
+    let path = source_path.to_string();
+    let source_fingerprint = tokio::task::spawn_blocking(move || source_file_fingerprint(&path))
+        .await
+        .map_err(|error| format!("Failed to verify source file before remux: {}", error))??;
+
+    remux().await?;
+
+    let path = source_path.to_string();
+    let fingerprint_after_remux =
+        tokio::task::spawn_blocking(move || source_file_fingerprint(&path))
+            .await
+            .map_err(|error| format!("Failed to verify source file after remux: {}", error))??;
+    if fingerprint_after_remux != source_fingerprint {
+        return Err(format!(
+            "Source file changed during remux; retry this file: {}",
+            source_path
+        ));
+    }
+
+    project.mark_file_completed(source_path, source_fingerprint.clone());
+    Ok(source_fingerprint)
+}
+
 async fn run_mux_queue(window: Window, state: AppStateType, muxer_state: Arc<Mutex<Muxer>>) {
     loop {
         // Check if we should stop or wait (drop guard before any await).
@@ -625,7 +658,7 @@ async fn run_mux_queue(window: Window, state: AppStateType, muxer_state: Arc<Mut
                 let files: Vec<_> = project
                     .volumes
                     .iter()
-                    .flat_map(|volume| &volume.files)
+                    .flat_map(|volume| volume.files.iter().cloned())
                     .collect();
                 let total_files = files.len();
                 let mut processed_files = project.completed_file_count();
@@ -671,7 +704,7 @@ async fn run_mux_queue(window: Window, state: AppStateType, muxer_state: Arc<Mut
                         _ => "Extra",
                     };
 
-                    let output_filename = generate_output_filename(file, &project.output_name);
+                    let output_filename = generate_output_filename(&file, &project.output_name);
                     let output_dir = PathBuf::from(&project.output_path)
                         .join(&project.output_name)
                         .join(subfolder);
@@ -719,28 +752,13 @@ async fn run_mux_queue(window: Window, state: AppStateType, muxer_state: Arc<Mut
                         tracks: file.tracks.clone(),
                     };
 
-                    let source_path = file.path.clone();
-                    let source_fingerprint = match tokio::task::spawn_blocking(move || {
-                        source_file_fingerprint(&source_path)
+                    let muxer_path = settings.mkvmerge_path.clone();
+                    match remux_and_mark_file_completed(&mut project, &file.path, || async {
+                        Muxer::run_mkvmerge(&muxer_path, &job).await
                     })
                     .await
                     {
-                        Ok(Ok(fingerprint)) => fingerprint,
-                        Ok(Err(error)) => {
-                            failed_files.push(format!("{}: {}", file.filename, error));
-                            continue;
-                        }
-                        Err(error) => {
-                            failed_files.push(format!(
-                                "{}: Failed to verify source file: {}",
-                                file.filename, error
-                            ));
-                            continue;
-                        }
-                    };
-
-                    match Muxer::run_mkvmerge(&settings.mkvmerge_path, &job).await {
-                        Ok(()) => {
+                        Ok(source_fingerprint) => {
                             processed_files += 1;
                             let mut app_state = state.lock();
                             if let Some(p) = app_state.queue.iter_mut().find(|p| p.id == project.id)
@@ -769,10 +787,11 @@ async fn run_mux_queue(window: Window, state: AppStateType, muxer_state: Arc<Mut
                                 },
                             );
                         }
-                        Err(e) => {
-                            eprintln!("Muxing failed for {}: {}", file.filename, e);
-                            let _ = window.emit("app-error", format!("{}: {}", file.filename, e));
-                            failed_files.push(format!("{}: {}", file.filename, e));
+                        Err(error) => {
+                            eprintln!("Muxing failed for {}: {}", file.filename, error);
+                            let _ =
+                                window.emit("app-error", format!("{}: {}", file.filename, error));
+                            failed_files.push(format!("{}: {}", file.filename, error));
                         }
                     }
                 }
@@ -1634,6 +1653,52 @@ mod queue_retry_tests {
             ensure_muxer_idle(&muxer).unwrap_err(),
             "Muxer is already running"
         );
+    }
+}
+
+#[cfg(test)]
+mod remux_source_change_tests {
+    use super::remux_and_mark_file_completed;
+    use crate::state::{Project, ProjectStatus};
+    use chrono::Utc;
+    use std::collections::HashMap;
+    use std::fs;
+    use uuid::Uuid;
+
+    #[tokio::test]
+    async fn source_changed_during_remux_is_not_marked_complete() {
+        let directory = std::env::temp_dir().join(format!(
+            "bdmv-remuxer-source-change-test-{}",
+            Uuid::new_v4()
+        ));
+        fs::create_dir_all(&directory).unwrap();
+        let source_path = directory.join("source.m2ts").to_string_lossy().to_string();
+        fs::write(&source_path, b"original source contents").unwrap();
+        let mut project = Project {
+            id: "source-change-project".into(),
+            output_name: "source-change".into(),
+            output_path: directory.to_string_lossy().to_string(),
+            volumes: Vec::new(),
+            track_templates: HashMap::new(),
+            status: ProjectStatus::Processing,
+            progress: 0.0,
+            current_file: None,
+            completed_files: Vec::new(),
+            created_at: Utc::now(),
+            error: None,
+        };
+
+        let result = remux_and_mark_file_completed(&mut project, &source_path, || async {
+            tokio::fs::write(&source_path, b"changed during remux")
+                .await
+                .map_err(|error| error.to_string())
+        })
+        .await;
+
+        let error = result.expect_err("changed source must fail verification");
+        assert!(error.contains("changed during remux"));
+        assert!(!project.is_file_completed(&source_path));
+        fs::remove_dir_all(directory).unwrap();
     }
 }
 
