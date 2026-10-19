@@ -46,6 +46,130 @@ impl Default for Settings {
 
 impl Settings {
     const FILE_NAME: &'static str = "settings.json";
+    const RECOVERY_FIELD_NAMES: [&'static str; 8] = [
+        "mkvmerge_path",
+        "ffprobe_path",
+        "min_episode_duration",
+        "min_extra_duration",
+        "op_ed_min_duration",
+        "op_ed_max_duration",
+        "episode_folder_name",
+        "extra_folder_name",
+    ];
+
+    pub fn preview_recovery_backup(path: &Path) -> Result<SettingsRecoveryPreview, String> {
+        let contents = fs::read(path).map_err(|error| {
+            format!(
+                "Could not read the recovered preferences backup at {}: {}",
+                path.display(),
+                error
+            )
+        })?;
+        let value: serde_json::Value = serde_json::from_slice(&contents).map_err(|error| {
+            format!(
+                "The recovered preferences backup is not valid JSON: {}",
+                error
+            )
+        })?;
+        let object = value.as_object().ok_or_else(|| {
+            "The recovered preferences backup must contain a JSON object of preferences."
+                .to_string()
+        })?;
+
+        let mut settings = Self::default();
+        let mut warnings = Vec::new();
+        let mut recognized_fields = 0;
+
+        for name in object.keys() {
+            if Self::RECOVERY_FIELD_NAMES.contains(&name.as_str()) {
+                recognized_fields += 1;
+            } else {
+                warnings.push(format!(
+                    "Unrecognized preference '{}' will be ignored.",
+                    name
+                ));
+            }
+        }
+
+        restore_string_field(
+            object,
+            "mkvmerge_path",
+            "MKVToolNix path",
+            &mut settings.mkvmerge_path,
+            &mut warnings,
+        );
+        restore_string_field(
+            object,
+            "ffprobe_path",
+            "FFprobe path",
+            &mut settings.ffprobe_path,
+            &mut warnings,
+        );
+        restore_positive_integer_field(
+            object,
+            "min_episode_duration",
+            "Minimum episode duration",
+            &mut settings.min_episode_duration,
+            &mut warnings,
+        );
+        restore_positive_integer_field(
+            object,
+            "min_extra_duration",
+            "Minimum extra duration",
+            &mut settings.min_extra_duration,
+            &mut warnings,
+        );
+        restore_positive_integer_field(
+            object,
+            "op_ed_min_duration",
+            "OP/ED minimum duration",
+            &mut settings.op_ed_min_duration,
+            &mut warnings,
+        );
+        restore_positive_integer_field(
+            object,
+            "op_ed_max_duration",
+            "OP/ED maximum duration",
+            &mut settings.op_ed_max_duration,
+            &mut warnings,
+        );
+        restore_string_field(
+            object,
+            "episode_folder_name",
+            "Episode folder name",
+            &mut settings.episode_folder_name,
+            &mut warnings,
+        );
+        restore_string_field(
+            object,
+            "extra_folder_name",
+            "Extra folder name",
+            &mut settings.extra_folder_name,
+            &mut warnings,
+        );
+
+        if recognized_fields == 0 {
+            warnings.push(
+                "No recognized preferences were found; restoring will use default values."
+                    .to_string(),
+            );
+        }
+
+        if settings.op_ed_min_duration > settings.op_ed_max_duration {
+            settings.op_ed_min_duration = Self::default().op_ed_min_duration;
+            settings.op_ed_max_duration = Self::default().op_ed_max_duration;
+            warnings.push(
+                "The OP/ED minimum duration is greater than its maximum; the default OP/ED range will be restored."
+                    .to_string(),
+            );
+        }
+
+        Ok(SettingsRecoveryPreview {
+            settings,
+            warnings,
+            source_hash: format!("{:x}", Sha256::digest(&contents)),
+        })
+    }
 
     pub fn load_with_recovery(config_dir: &Path) -> SettingsLoadOutcome {
         let path = config_dir.join(Self::FILE_NAME);
@@ -118,6 +242,51 @@ impl Settings {
         let contents = serde_json::to_vec_pretty(self)
             .map_err(|error| format!("Failed to serialize settings: {}", error))?;
         write_settings_atomically(&path, &contents)
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub struct SettingsRecoveryPreview {
+    pub settings: Settings,
+    pub warnings: Vec<String>,
+    pub source_hash: String,
+}
+
+fn restore_string_field(
+    object: &serde_json::Map<String, serde_json::Value>,
+    field: &str,
+    label: &str,
+    target: &mut String,
+    warnings: &mut Vec<String>,
+) {
+    let Some(value) = object.get(field) else {
+        return;
+    };
+    match value.as_str().filter(|value| !value.trim().is_empty()) {
+        Some(value) => *target = value.to_string(),
+        None => warnings.push(format!(
+            "{} was invalid or empty; the default value will be used.",
+            label
+        )),
+    }
+}
+
+fn restore_positive_integer_field(
+    object: &serde_json::Map<String, serde_json::Value>,
+    field: &str,
+    label: &str,
+    target: &mut i64,
+    warnings: &mut Vec<String>,
+) {
+    let Some(value) = object.get(field) else {
+        return;
+    };
+    match value.as_i64().filter(|value| *value > 0) {
+        Some(value) => *target = value,
+        None => warnings.push(format!(
+            "{} was invalid; a positive whole number is required, so the default value will be used.",
+            label
+        )),
     }
 }
 
@@ -800,6 +969,122 @@ mod tests {
             std::fs::read_to_string(config_dir.join("settings.json.corrupt.1")).unwrap(),
             "{ broken again"
         );
+
+        std::fs::remove_dir_all(config_dir).unwrap();
+    }
+
+    #[test]
+    fn recovery_backup_preview_keeps_valid_values_and_explains_invalid_entries() {
+        let config_dir = temporary_config_dir();
+        std::fs::create_dir_all(&config_dir).unwrap();
+        let backup_path = config_dir.join("settings.json.corrupt");
+        let backup_contents = br#"{
+            "mkvmerge_path": "",
+            "ffprobe_path": 27,
+            "min_episode_duration": -5,
+            "min_extra_duration": 240,
+            "op_ed_min_duration": 130,
+            "op_ed_max_duration": 100,
+            "episode_folder_name": "Episodes",
+            "unexpected_setting": true
+        }"#;
+        std::fs::write(&backup_path, backup_contents).unwrap();
+
+        let preview = Settings::preview_recovery_backup(&backup_path).unwrap();
+        let defaults = Settings::default();
+
+        assert_eq!(preview.settings.mkvmerge_path, defaults.mkvmerge_path);
+        assert_eq!(preview.settings.ffprobe_path, defaults.ffprobe_path);
+        assert_eq!(
+            preview.settings.min_episode_duration,
+            defaults.min_episode_duration
+        );
+        assert_eq!(preview.settings.min_extra_duration, 240);
+        assert_eq!(
+            preview.settings.op_ed_min_duration,
+            defaults.op_ed_min_duration
+        );
+        assert_eq!(
+            preview.settings.op_ed_max_duration,
+            defaults.op_ed_max_duration
+        );
+        assert_eq!(preview.settings.episode_folder_name, "Episodes");
+        assert!(preview
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("MKVToolNix path")));
+        assert!(preview
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("FFprobe path")));
+        assert!(preview
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("Minimum episode duration")));
+        assert!(preview
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("OP/ED minimum duration is greater")));
+        assert!(preview
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("unexpected_setting")));
+        assert_eq!(std::fs::read(&backup_path).unwrap(), backup_contents);
+
+        std::fs::remove_dir_all(config_dir).unwrap();
+    }
+
+    #[test]
+    fn restored_settings_can_be_saved_without_changing_recovery_backup() {
+        let config_dir = temporary_config_dir();
+        std::fs::create_dir_all(&config_dir).unwrap();
+        let backup_path = config_dir.join("settings.json.corrupt");
+        let backup_contents = br#"{"mkvmerge_path":"/tools/mkvmerge","min_extra_duration":240}"#;
+        std::fs::write(&backup_path, backup_contents).unwrap();
+
+        let preview = Settings::preview_recovery_backup(&backup_path).unwrap();
+        preview.settings.save_to_config_dir(&config_dir).unwrap();
+
+        let saved: Settings =
+            serde_json::from_slice(&std::fs::read(config_dir.join("settings.json")).unwrap())
+                .unwrap();
+        assert_eq!(saved.mkvmerge_path, "/tools/mkvmerge");
+        assert_eq!(saved.min_extra_duration, 240);
+        assert_eq!(std::fs::read(&backup_path).unwrap(), backup_contents);
+
+        std::fs::remove_dir_all(config_dir).unwrap();
+    }
+
+    #[test]
+    fn recovery_preview_hash_changes_when_the_backup_is_edited() {
+        let config_dir = temporary_config_dir();
+        std::fs::create_dir_all(&config_dir).unwrap();
+        let backup_path = config_dir.join("settings.json.corrupt");
+        std::fs::write(&backup_path, br#"{"mkvmerge_path":"mkvmerge"}"#).unwrap();
+
+        let reviewed = Settings::preview_recovery_backup(&backup_path).unwrap();
+        std::fs::write(&backup_path, br#"{"mkvmerge_path":"different"}"#).unwrap();
+        let edited = Settings::preview_recovery_backup(&backup_path).unwrap();
+
+        assert_ne!(reviewed.source_hash, edited.source_hash);
+        std::fs::remove_dir_all(config_dir).unwrap();
+    }
+
+    #[test]
+    fn recovery_preview_rejects_non_object_and_malformed_backup_files() {
+        let config_dir = temporary_config_dir();
+        std::fs::create_dir_all(&config_dir).unwrap();
+        let backup_path = config_dir.join("settings.json.corrupt");
+
+        std::fs::write(&backup_path, "[]").unwrap();
+        assert!(Settings::preview_recovery_backup(&backup_path)
+            .unwrap_err()
+            .contains("must contain a JSON object"));
+
+        std::fs::write(&backup_path, "{ broken").unwrap();
+        assert!(Settings::preview_recovery_backup(&backup_path)
+            .unwrap_err()
+            .contains("not valid JSON"));
 
         std::fs::remove_dir_all(config_dir).unwrap();
     }

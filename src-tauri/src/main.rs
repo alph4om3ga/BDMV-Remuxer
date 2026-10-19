@@ -10,7 +10,7 @@ use crate::bdmv::{BdmvParser, MediaFile, Track, Volume};
 use crate::muxer::{MuxJob, MuxProgress, Muxer};
 use crate::state::{
     settings_directory_for_config_root, source_file_fingerprint, AppState, Project, ProjectStatus,
-    Settings,
+    Settings, SettingsRecoveryPreview,
 };
 use parking_lot::Mutex;
 use serde::Serialize;
@@ -898,6 +898,48 @@ async fn open_settings_recovery_backup(
 }
 
 #[tauri::command]
+async fn preview_settings_recovery_backup(
+    state: State<'_, AppStateType>,
+) -> Result<SettingsRecoveryPreview, String> {
+    let backup_path = state
+        .lock()
+        .settings_recovery_backup_path()
+        .map(PathBuf::from)
+        .ok_or_else(|| "There is no recovered preferences backup to restore.".to_string())?;
+
+    Settings::preview_recovery_backup(&backup_path)
+}
+
+#[tauri::command]
+async fn restore_settings_recovery_backup(
+    expected_source_hash: String,
+    state: State<'_, AppStateType>,
+) -> Result<Settings, String> {
+    let backup_path = {
+        let app_state = state.lock();
+        app_state.ensure_settings_savable()?;
+        app_state
+            .settings_recovery_backup_path()
+            .map(PathBuf::from)
+            .ok_or_else(|| "There is no recovered preferences backup to restore.".to_string())?
+    };
+    let preview = Settings::preview_recovery_backup(&backup_path)?;
+    if preview.source_hash != expected_source_hash {
+        return Err(
+            "The recovered preferences backup changed after it was reviewed. Preview it again before restoring."
+                .to_string(),
+        );
+    }
+    let config_dir = settings_config_dir()?;
+    preview.settings.save_to_config_dir(&config_dir)?;
+
+    let mut app_state = state.lock();
+    app_state.settings = preview.settings.clone();
+    app_state.set_settings_recovery(None, None, true);
+    Ok(preview.settings)
+}
+
+#[tauri::command]
 async fn save_settings(settings: Settings, state: State<'_, AppStateType>) -> Result<(), String> {
     let mut app_state = state.lock();
     app_state.ensure_settings_savable()?;
@@ -1058,6 +1100,8 @@ fn main() {
             // Settings
             get_settings,
             open_settings_recovery_backup,
+            preview_settings_recovery_backup,
+            restore_settings_recovery_backup,
             save_settings,
             save_track_template,
             get_track_templates,

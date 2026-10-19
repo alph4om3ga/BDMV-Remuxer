@@ -77,6 +77,12 @@ export interface Settings {
   extra_folder_name: string;
 }
 
+export interface SettingsRecoveryPreview {
+  settings: Settings;
+  warnings: string[];
+  source_hash: string;
+}
+
 // ============================================================================
 // Categories
 // ============================================================================

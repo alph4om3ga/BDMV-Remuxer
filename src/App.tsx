@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { useAppStore } from './store';
-import { open } from '@tauri-apps/api/dialog';
+import { confirm, open } from '@tauri-apps/api/dialog';
 import { 
   FolderOpen, Play, Pause, Settings, ChevronRight, ChevronDown, 
   Film, Tv, Music, Star, AlertTriangle, Check, X, Edit3, 
@@ -337,10 +337,17 @@ const TrackEditor: React.FC<TrackEditorProps> = ({ file, volumeId, onClose }) =>
 
 interface SettingsModalProps {
   settings: SettingsType;
+  recoveryBackupAvailable: boolean;
+  onRestoreBackup: () => void;
   onClose: () => void;
 }
 
-const SettingsModal: React.FC<SettingsModalProps> = ({ settings: initialSettings, onClose }) => {
+const SettingsModal: React.FC<SettingsModalProps> = ({
+  settings: initialSettings,
+  recoveryBackupAvailable,
+  onRestoreBackup,
+  onClose,
+}) => {
   const { saveSettings } = useAppStore();
   const [settings, setSettings] = useState<SettingsType>(initialSettings);
   const [browseError, setBrowseError] = useState<string | null>(null);
@@ -507,6 +514,20 @@ const SettingsModal: React.FC<SettingsModalProps> = ({ settings: initialSettings
               </div>
             </div>
           </div>
+
+          {recoveryBackupAvailable && (
+            <div className="settings-group">
+              <h4>Preference Recovery</h4>
+              <p className="recovery-settings-copy">
+                Review and restore preferences from the preserved backup. The backup is kept unchanged.
+              </p>
+              <div>
+                <button className="btn secondary" onClick={onRestoreBackup}>
+                  <RotateCw size={15} /> Review backup for restore
+                </button>
+              </div>
+            </div>
+          )}
         </div>
         <div className="modal-footer">
           <button className="btn secondary" onClick={onClose}>Cancel</button>
@@ -643,6 +664,10 @@ const App: React.FC = () => {
     error,
     recoveryWarning,
     recoveryBackupAvailable,
+    recoveryRestorePreview,
+    recoveryRestoreError,
+    isPreparingRecoveryRestore,
+    isRestoringRecoveryBackup,
     outputName,
     outputPath,
     loadBdmv,
@@ -659,6 +684,9 @@ const App: React.FC = () => {
     stopMuxing,
     loadSettings,
     openRecoveryBackup,
+    previewRecoveryBackup,
+    restoreRecoveryBackup,
+    dismissRecoveryRestorePreview,
     dismissRecoveryWarning,
     loadQueue,
     loadCurrentVolumes,
@@ -673,6 +701,19 @@ const App: React.FC = () => {
   const [editingTemplate, setEditingTemplate] = useState<FileCategory | null>(null);
   const visibleNotice = getVisibleNotice(recoveryWarning, error);
   const showRecoveryBackup = isRecoveryBackupVisible(recoveryWarning, recoveryBackupAvailable);
+
+  const handleRestoreRecoveryBackup = async () => {
+    if (!recoveryRestorePreview) return;
+    try {
+      const confirmed = await confirm(
+        'Replace the current preferences with the reviewed backup settings? The preserved backup will not be changed.',
+        { title: 'Confirm preferences restore', type: 'warning' },
+      );
+      if (confirmed) await restoreRecoveryBackup();
+    } catch (restoreError) {
+      useAppStore.setState({ recoveryRestoreError: String(restoreError) });
+    }
+  };
   
   // Initialize app
   useEffect(() => {
@@ -728,13 +769,22 @@ const App: React.FC = () => {
           <AlertTriangle size={18} />
           <span>{visibleNotice}</span>
           {showRecoveryBackup && (
-            <button
-              className="recovery-backup-button"
-              onClick={openRecoveryBackup}
-              title="Open the preserved preferences backup"
-            >
-              <FolderOpen size={15} /> Open backup
-            </button>
+            <>
+              <button
+                className="recovery-backup-button"
+                onClick={openRecoveryBackup}
+                title="Open the preserved preferences backup"
+              >
+                <FolderOpen size={15} /> Open backup
+              </button>
+              <button
+                className="recovery-backup-button"
+                onClick={previewRecoveryBackup}
+                title="Review and restore preferences from the preserved backup"
+              >
+                <RotateCw size={15} /> Restore backup
+              </button>
+            </>
           )}
           <button
             onClick={() => recoveryWarning
@@ -952,8 +1002,81 @@ const App: React.FC = () => {
       {showSettings && settings && (
         <SettingsModal 
           settings={settings}
+          recoveryBackupAvailable={recoveryBackupAvailable}
+          onRestoreBackup={previewRecoveryBackup}
           onClose={() => setShowSettings(false)}
         />
+      )}
+
+      {(recoveryRestorePreview || recoveryRestoreError || isPreparingRecoveryRestore) && (
+        <div className="modal-overlay" onClick={dismissRecoveryRestorePreview}>
+          <div
+            className="modal settings-modal recovery-restore-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="recovery-restore-title"
+            onClick={event => event.stopPropagation()}
+          >
+            <div className="modal-header">
+              <h3 id="recovery-restore-title"><RotateCw size={20} /> Restore Preferences</h3>
+              <button
+                className="modal-close"
+                onClick={dismissRecoveryRestorePreview}
+                aria-label="Close restore preview"
+              >
+                <X size={20} />
+              </button>
+            </div>
+            <div className="modal-body">
+              {isPreparingRecoveryRestore && <p>Validating the preserved preferences backup…</p>}
+              {recoveryRestoreError && (
+                <p className="settings-error" role="alert">{recoveryRestoreError}</p>
+              )}
+              {recoveryRestorePreview && (
+                <>
+                  <p>
+                    Review the backup before applying it. The current preferences will be replaced;
+                    the preserved backup itself will not be changed. Missing or invalid values use
+                    defaults.
+                  </p>
+                  {recoveryRestorePreview.warnings.length > 0 ? (
+                    <div className="recovery-restore-warnings" role="status">
+                      <strong>Items to review</strong>
+                      <ul>
+                        {recoveryRestorePreview.warnings.map((warning, index) => (
+                          <li key={`${index}-${warning}`}>{warning}</li>
+                        ))}
+                      </ul>
+                    </div>
+                  ) : (
+                    <p className="recovery-restore-valid" role="status">
+                      All saved preference values passed validation.
+                    </p>
+                  )}
+                </>
+              )}
+            </div>
+            <div className="modal-footer">
+              <button
+                className="btn secondary"
+                onClick={dismissRecoveryRestorePreview}
+                disabled={isRestoringRecoveryBackup}
+              >
+                Cancel
+              </button>
+              {recoveryRestorePreview && (
+                <button
+                  className="btn primary"
+                  onClick={handleRestoreRecoveryBackup}
+                  disabled={isRestoringRecoveryBackup}
+                >
+                  <Check size={16} />
+                  {isRestoringRecoveryBackup ? 'Restoring…' : 'Restore Preferences'}
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
       )}
       
       {/* Loading Overlay */}

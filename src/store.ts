@@ -2,7 +2,14 @@ import { create } from 'zustand';
 import { invoke } from '@tauri-apps/api/tauri';
 import { confirm, open } from '@tauri-apps/api/dialog';
 import { listen } from '@tauri-apps/api/event';
-import type { Volume, Project, Settings, Track, FileCategory } from './types';
+import type {
+  Volume,
+  Project,
+  Settings,
+  SettingsRecoveryPreview,
+  Track,
+  FileCategory,
+} from './types';
 import { handleMuxCloseRequested } from './muxCloseConfirmation.js';
 import {
   getRecoveryWarningDismissUpdate,
@@ -31,6 +38,10 @@ interface AppStore {
   settings: Settings | null;
   recoveryWarning: string | null;
   recoveryBackupAvailable: boolean;
+  recoveryRestorePreview: SettingsRecoveryPreview | null;
+  recoveryRestoreError: string | null;
+  isPreparingRecoveryRestore: boolean;
+  isRestoringRecoveryBackup: boolean;
   trackTemplates: Record<string, Track[]>;
   selectedFileId: string | null;
   expandedVolumes: Record<string, boolean>;
@@ -57,6 +68,9 @@ interface AppStore {
   stopMuxing: () => Promise<void>;
   loadSettings: () => Promise<void>;
   openRecoveryBackup: () => Promise<void>;
+  previewRecoveryBackup: () => Promise<void>;
+  restoreRecoveryBackup: () => Promise<void>;
+  dismissRecoveryRestorePreview: () => void;
   dismissRecoveryWarning: () => void;
   saveSettings: (settings: Settings) => Promise<void>;
   loadQueue: () => Promise<void>;
@@ -74,6 +88,10 @@ export const useAppStore = create<AppStore>((set, get) => ({
   settings: null,
   recoveryWarning: null,
   recoveryBackupAvailable: false,
+  recoveryRestorePreview: null,
+  recoveryRestoreError: null,
+  isPreparingRecoveryRestore: false,
+  isRestoringRecoveryBackup: false,
   trackTemplates: {},
   selectedFileId: null,
   expandedVolumes: {},
@@ -288,6 +306,54 @@ export const useAppStore = create<AppStore>((set, get) => ({
       set({ error: String(e) });
     }
   },
+
+  previewRecoveryBackup: async () => {
+    set({
+      recoveryRestorePreview: null,
+      recoveryRestoreError: null,
+      isPreparingRecoveryRestore: true,
+    });
+    try {
+      const recoveryRestorePreview = await invoke<SettingsRecoveryPreview>(
+        'preview_settings_recovery_backup',
+      );
+      set({ recoveryRestorePreview, isPreparingRecoveryRestore: false });
+    } catch (e) {
+      set({
+        recoveryRestoreError: String(e),
+        isPreparingRecoveryRestore: false,
+      });
+    }
+  },
+
+  restoreRecoveryBackup: async () => {
+    const preview = get().recoveryRestorePreview;
+    if (!preview) return;
+
+    set({ isRestoringRecoveryBackup: true, recoveryRestoreError: null });
+    try {
+      const settings = await invoke<Settings>('restore_settings_recovery_backup', {
+        expectedSourceHash: preview.source_hash,
+      });
+      set({
+        ...getSettingsSaveSuccessUpdate(settings),
+        recoveryRestorePreview: null,
+        recoveryRestoreError: null,
+        isRestoringRecoveryBackup: false,
+      });
+    } catch (e) {
+      set({
+        recoveryRestoreError: String(e),
+        isRestoringRecoveryBackup: false,
+      });
+    }
+  },
+
+  dismissRecoveryRestorePreview: () => set({
+    recoveryRestorePreview: null,
+    recoveryRestoreError: null,
+    isPreparingRecoveryRestore: false,
+  }),
 
   dismissRecoveryWarning: () => set(getRecoveryWarningDismissUpdate()),
 
