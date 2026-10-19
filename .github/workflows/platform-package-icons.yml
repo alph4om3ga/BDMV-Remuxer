@@ -1,4 +1,4 @@
-name: Native package icon checks
+name: Native package checks
 
 on:
   pull_request:
@@ -6,8 +6,12 @@ on:
       - ".github/workflows/platform-package-icons.yml"
       - "package.json"
       - "package-lock.json"
+      - "index.html"
       - "scripts/verify-platform-icons.mjs"
+      - "scripts/smoke-macos-window.swift"
+      - "src/**"
       - "src-tauri/**"
+      - "vite.config.ts"
   push:
     branches:
       - main
@@ -15,8 +19,12 @@ on:
       - ".github/workflows/platform-package-icons.yml"
       - "package.json"
       - "package-lock.json"
+      - "index.html"
       - "scripts/verify-platform-icons.mjs"
+      - "scripts/smoke-macos-window.swift"
+      - "src/**"
       - "src-tauri/**"
+      - "vite.config.ts"
   workflow_dispatch:
 
 permissions:
@@ -24,7 +32,7 @@ permissions:
 
 jobs:
   windows:
-    name: Windows MSI icon
+    name: Windows MSI install and launch
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -51,9 +59,62 @@ jobs:
             throw "The executable icon is too small: $($icon.Width)x$($icon.Height)."
           }
           Write-Host "Verified $($msi.Count) MSI package(s) and executable icon: $($icon.Width)x$($icon.Height)."
+      - name: Install MSI and verify the app opens its main window
+        shell: pwsh
+        run: |
+          $msi = Get-ChildItem "src-tauri/target/release/bundle/msi" -Filter "*.msi" -File |
+            Select-Object -First 1
+          if (-not $msi) { throw "No Windows MSI is available to install." }
+
+          $installDir = Join-Path $env:RUNNER_TEMP "bdmv remuxer installed"
+          $install = Start-Process -FilePath "msiexec.exe" `
+            -ArgumentList "/i `"$($msi.FullName)`" /qn /norestart INSTALLDIR=`"$installDir`"" `
+            -Wait -PassThru
+          if ($install.ExitCode -notin @(0, 3010)) {
+            throw "MSI installation failed with exit code $($install.ExitCode)."
+          }
+
+          $exe = Join-Path $installDir "bdmv-remuxer.exe"
+          if (-not (Test-Path $exe)) {
+            throw "The MSI completed but did not install the application at $exe."
+          }
+
+          $app = Start-Process -FilePath $exe -PassThru
+          try {
+            $windowOpened = $false
+            for ($attempt = 0; $attempt -lt 60; $attempt++) {
+              $app.Refresh()
+              if ($app.HasExited) {
+                throw "The installed application exited during startup with code $($app.ExitCode)."
+              }
+              if ($app.MainWindowHandle -ne [IntPtr]::Zero) {
+                $windowOpened = $true
+                break
+              }
+              Start-Sleep -Seconds 1
+            }
+            if (-not $windowOpened) {
+              throw "The installed application stayed running but did not open its main window within 60 seconds."
+            }
+            Start-Sleep -Seconds 3
+            $app.Refresh()
+            if ($app.HasExited) {
+              throw "The installed application exited shortly after opening its main window."
+            }
+            if ($app.MainWindowHandle -eq [IntPtr]::Zero) {
+              throw "The installed application closed its main window during the startup check."
+            }
+            Write-Host "The installed Windows application opened its main window."
+          }
+          finally {
+            $app.Refresh()
+            if (-not $app.HasExited) {
+              Stop-Process -Id $app.Id -Force
+            }
+          }
 
   macos:
-    name: macOS app and DMG icons
+    name: macOS DMG mount and app launch
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
@@ -84,3 +145,62 @@ jobs:
           node scripts/verify-platform-icons.mjs --packaged-icns "$icon_path"
           hdiutil verify "$dmg"
           echo "Verified app bundle icon metadata and disk image: $dmg"
+      - name: Mount DMG and verify the app opens its main window
+        shell: bash
+        run: |
+          set -euo pipefail
+          dmg="$(find src-tauri/target/release/bundle/dmg -maxdepth 1 -type f -name '*.dmg' -print -quit)"
+          mount_point="$RUNNER_TEMP/bdmv-remuxer-dmg"
+          checker="$RUNNER_TEMP/check-bdmv-remuxer-window"
+          bundle_id="com.bdmv-remuxer.app"
+          app_pid=""
+
+          mkdir -p "$mount_point"
+          hdiutil attach -nobrowse -readonly -mountpoint "$mount_point" "$dmg" >/dev/null
+          cleanup() {
+            if [ -n "$app_pid" ]; then
+              kill -TERM "$app_pid" >/dev/null 2>&1 || true
+              for _ in {1..10}; do
+                kill -0 "$app_pid" >/dev/null 2>&1 || break
+                sleep 0.5
+              done
+            fi
+            hdiutil detach "$mount_point" -quiet || hdiutil detach -force "$mount_point" -quiet || true
+          }
+          trap cleanup EXIT
+
+          app="$(find "$mount_point" -maxdepth 2 -type d -name '*.app' -print -quit)"
+          test -n "$app" || { echo "The mounted DMG does not contain a macOS app bundle." >&2; exit 1; }
+
+          swiftc scripts/smoke-macos-window.swift -o "$checker"
+          open -n "$app"
+
+          window_opened=false
+          for _ in {1..60}; do
+            if app_pid="$("$checker" "$bundle_id" 2>/dev/null)"; then
+              window_opened=true
+              break
+            fi
+            sleep 1
+          done
+
+          if [ "$window_opened" != true ]; then
+            set +e
+            "$checker" "$bundle_id"
+            checker_status=$?
+            set -e
+            if [ "$checker_status" -eq 2 ]; then
+              echo "The app exited or did not start from the mounted DMG." >&2
+            else
+              echo "The app remained open but did not create a visible main window within 60 seconds." >&2
+            fi
+            exit 1
+          fi
+
+          sleep 3
+          if ! app_pid="$("$checker" "$bundle_id")"; then
+            echo "The app did not keep its main window open after startup." >&2
+            exit 1
+          fi
+
+          echo "The app launched from the mounted DMG and opened its main window."
