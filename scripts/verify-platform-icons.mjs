@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import sharp from "sharp";
 
 const configPath = resolve("src-tauri/tauri.conf.json");
 const config = JSON.parse(readFileSync(configPath, "utf8"));
@@ -31,6 +32,7 @@ function verifyIco(file) {
   }
 
   const sizes = new Set();
+  const images = new Map();
   for (let index = 0; index < count; index += 1) {
     const entry = 6 + index * 16;
     const width = data[entry] || 256;
@@ -52,6 +54,7 @@ function verifyIco(file) {
       if (pngWidth !== width || pngHeight !== height) {
         throw new Error(`${file} entry ${index} directory and PNG dimensions differ`);
       }
+      images.set(`${width}x${height}`, payload);
     } else {
       if (payload.length < 40 || data.readUInt32LE(offset) < 40) {
         throw new Error(`${file} entry ${index} has an invalid bitmap header`);
@@ -70,6 +73,7 @@ function verifyIco(file) {
     throw new Error(`${file} must include ${expected.join(", ")} pixel images`);
   }
   console.log(`Verified ${file}: ${expected.map((size) => `${size}x${size}`).join(", ")}`);
+  return images;
 }
 
 function verifyIcns(file) {
@@ -90,6 +94,7 @@ function verifyIcns(file) {
     ["ic10", 1024],
   ]);
   const found = new Set();
+  const images = new Map();
   let offset = 8;
   while (offset < data.length) {
     if (offset + 8 > data.length) {
@@ -109,6 +114,7 @@ function verifyIcns(file) {
         throw new Error(`${file} ${type} image is ${width}x${height}; expected ${dimension}x${dimension}`);
       }
       found.add(type);
+      images.set(type, payload);
     }
     offset = end;
   }
@@ -118,10 +124,26 @@ function verifyIcns(file) {
     throw new Error(`${file} is missing required icon sizes: ${missing.join(", ")}`);
   }
   console.log(`Verified ${file}: 32x32, 128x128, 256x256, 512x512, 1024x1024`);
+  return images;
 }
 
-verifyIco(resolve("src-tauri/icons/icon.ico"));
-verifyIcns(resolve("src-tauri/icons/icon.icns"));
+async function assertSamePixels(reference, candidate, label) {
+  // ICO/ICNS container changes and PNG re-encoding are allowed; decoded RGBA pixels must remain identical.
+  const [referenceImage, candidateImage] = await Promise.all([
+    sharp(reference).ensureAlpha().raw().toBuffer({ resolveWithObject: true }),
+    sharp(candidate).ensureAlpha().raw().toBuffer({ resolveWithObject: true }),
+  ]);
+  const { width, height } = referenceImage.info;
+  if (width !== candidateImage.info.width || height !== candidateImage.info.height) {
+    throw new Error(`${label} dimensions differ: expected ${width}x${height}, found ${candidateImage.info.width}x${candidateImage.info.height}`);
+  }
+  if (!referenceImage.data.equals(candidateImage.data)) {
+    throw new Error(`${label} artwork differs from the checked-in generated icon`);
+  }
+}
+
+const generatedIcoImages = verifyIco(resolve("src-tauri/icons/icon.ico"));
+const generatedIcnsImages = verifyIcns(resolve("src-tauri/icons/icon.icns"));
 
 const packagedIcnsIndex = process.argv.indexOf("--packaged-icns");
 if (packagedIcnsIndex !== -1) {
@@ -129,5 +151,30 @@ if (packagedIcnsIndex !== -1) {
   if (!packagedIcns) {
     throw new Error("--packaged-icns requires a path to the ICNS file in the app bundle");
   }
-  verifyIcns(resolve(packagedIcns));
+  const packagedImages = verifyIcns(resolve(packagedIcns));
+  for (const type of ["icp5", "ic07", "ic08", "ic09", "ic10"]) {
+    await assertSamePixels(
+      generatedIcnsImages.get(type),
+      packagedImages.get(type),
+      `Packaged ICNS ${type}`,
+    );
+  }
+  console.log(`Verified packaged ICNS artwork matches ${resolve("src-tauri/icons/icon.icns")}`);
+}
+
+const packagedPngIndex = process.argv.indexOf("--packaged-icon-png");
+if (packagedPngIndex !== -1) {
+  const packagedPng = process.argv[packagedPngIndex + 1];
+  if (!packagedPng) {
+    throw new Error("--packaged-icon-png requires a path to an extracted executable icon PNG");
+  }
+  const packagedPath = resolve(packagedPng);
+  const packagedInfo = await sharp(packagedPath).metadata();
+  const size = `${packagedInfo.width}x${packagedInfo.height}`;
+  const reference = generatedIcoImages.get(size);
+  if (!reference) {
+    throw new Error(`Extracted executable icon is ${size}; no matching checked-in ICO image exists`);
+  }
+  await assertSamePixels(reference, readFileSync(packagedPath), `Packaged executable icon ${size}`);
+  console.log(`Verified packaged executable icon artwork matches the checked-in ${size} ICO image`);
 }

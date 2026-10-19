@@ -104,6 +104,25 @@ jobs:
             throw "The MSI completed but did not install the application at $exe."
           }
 
+          Add-Type -AssemblyName System.Drawing
+          $iconPng = Join-Path $env:RUNNER_TEMP "bdmv-remuxer-installed-icon.png"
+          $icon = [System.Drawing.Icon]::ExtractAssociatedIcon($exe)
+          if (-not $icon) {
+            throw "The application installed from the MSI has no readable icon resource."
+          }
+          $bitmap = $icon.ToBitmap()
+          try {
+            $bitmap.Save($iconPng, [System.Drawing.Imaging.ImageFormat]::Png)
+          }
+          finally {
+            $bitmap.Dispose()
+            $icon.Dispose()
+          }
+          node scripts/verify-platform-icons.mjs --packaged-icon-png $iconPng
+          if ($LASTEXITCODE -ne 0) {
+            throw "The application icon installed from the MSI does not match the checked-in icon artwork."
+          }
+
           $app = Start-Process -FilePath $exe -PassThru
           try {
             $windowOpened = $false
@@ -241,15 +260,34 @@ jobs:
           test -n "$app" || { echo "Tauri did not produce a macOS .app bundle." >&2; exit 1; }
           test -n "$dmg" || { echo "Tauri did not produce a macOS disk image." >&2; exit 1; }
 
-          icon_name="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIconFile' "$app/Contents/Info.plist")"
-          icon_path="$app/Contents/Resources/$icon_name"
-          if [ ! -f "$icon_path" ] && [ -f "$icon_path.icns" ]; then
-            icon_path="$icon_path.icns"
-          fi
-          test -f "$icon_path" || { echo "The app's CFBundleIconFile does not exist in Contents/Resources." >&2; exit 1; }
-          node scripts/verify-platform-icons.mjs --packaged-icns "$icon_path"
+          verify_app_icon() {
+            local app_path="$1"
+            local icon_name icon_path
+            icon_name="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIconFile' "$app_path/Contents/Info.plist")"
+            icon_path="$app_path/Contents/Resources/$icon_name"
+            if [ ! -f "$icon_path" ] && [ -f "$icon_path.icns" ]; then
+              icon_path="$icon_path.icns"
+            fi
+            test -f "$icon_path" || {
+              echo "The app's CFBundleIconFile does not exist in Contents/Resources: $app_path" >&2
+              return 1
+            }
+            node scripts/verify-platform-icons.mjs --packaged-icns "$icon_path"
+          }
+          verify_app_icon "$app"
+
+          mount_point="$RUNNER_TEMP/bdmv-remuxer-icon-dmg"
+          mkdir -p "$mount_point"
+          hdiutil attach -nobrowse -readonly -mountpoint "$mount_point" "$dmg" >/dev/null
+          cleanup_icon_dmg() {
+            hdiutil detach "$mount_point" -quiet || hdiutil detach -force "$mount_point" -quiet || true
+          }
+          trap cleanup_icon_dmg EXIT
+          dmg_app="$(find "$mount_point" -maxdepth 2 -type d -name '*.app' -print -quit)"
+          test -n "$dmg_app" || { echo "The DMG does not contain a macOS app bundle." >&2; exit 1; }
+          verify_app_icon "$dmg_app"
           hdiutil verify "$dmg"
-          echo "Verified app bundle icon metadata and disk image: $dmg"
+          echo "Verified app bundle and DMG icon artwork and disk image: $dmg"
       - name: Mount DMG and verify the app renders its main interface
         shell: bash
         run: |
