@@ -13,6 +13,7 @@ on:
       - "index.html"
       - "scripts/verify-platform-icons.mjs"
       - "scripts/smoke-macos-window.swift"
+      - "scripts/smoke-installed-close.ps1"
       - "src/**"
       - "src-tauri/**"
       - "vite.config.ts"
@@ -30,6 +31,7 @@ on:
       - "index.html"
       - "scripts/verify-platform-icons.mjs"
       - "scripts/smoke-macos-window.swift"
+      - "scripts/smoke-installed-close.ps1"
       - "src/**"
       - "src-tauri/**"
       - "vite.config.ts"
@@ -321,6 +323,18 @@ jobs:
             throw "The remux output is not a Matroska file with at least one track."
           }
           Write-Host "Verified installed-app remux output: $($probe.tracks.Count) track(s), $((Get-Item $output).Length) bytes."
+      - name: Verify native close waits for the active file and resumes the queue
+        shell: pwsh
+        run: |
+          $exe = Join-Path $env:RUNNER_TEMP "bdmv remuxer installed\bdmv-remuxer.exe"
+          $mkvmerge = (Get-Command mkvmerge.exe -ErrorAction Stop).Source
+          $fixture = Join-Path $env:GITHUB_WORKSPACE "src-tauri\tests\fixtures\remux-smoke-input.mkv"
+          $work = Join-Path $env:RUNNER_TEMP "bdmv remuxer close smoke"
+          & "$env:GITHUB_WORKSPACE\scripts\smoke-installed-close.ps1" `
+            -Executable $exe `
+            -Mkvmerge $mkvmerge `
+            -Fixture $fixture `
+            -WorkDirectory $work
 
   macos:
     name: macOS DMG mount and app launch
