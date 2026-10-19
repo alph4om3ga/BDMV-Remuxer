@@ -68,7 +68,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - run: npm ci
       - run: node scripts/verify-platform-icons.mjs
-      - name: Test media-tool launch errors on Windows
+      - name: Test settings replacement and Rust suite on Windows
         run: cargo test --manifest-path src-tauri/Cargo.toml --no-default-features
       - name: Build Windows installer
         run: npm run tauri -- build --bundles msi --ci

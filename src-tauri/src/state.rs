@@ -1314,15 +1314,22 @@ mod tests {
         let config_dir = temporary_config_dir();
         std::fs::create_dir_all(&config_dir).unwrap();
         let settings_path = config_dir.join("settings.json");
-        std::fs::write(&settings_path, "previous settings").unwrap();
+        let mut previous_settings = Settings::default();
+        previous_settings.mkvmerge_path = "/previous/bin/mkvmerge".into();
+        std::fs::write(
+            &settings_path,
+            serde_json::to_vec(&previous_settings).unwrap(),
+        )
+        .unwrap();
 
         let mut settings = Settings::default();
         settings.mkvmerge_path = "/custom/bin/mkvmerge".into();
         settings.save_to_config_dir(&config_dir).unwrap();
 
-        let saved: Settings =
-            serde_json::from_slice(&std::fs::read(&settings_path).unwrap()).unwrap();
-        assert_eq!(saved.mkvmerge_path, "/custom/bin/mkvmerge");
+        let reloaded = Settings::load_with_recovery(&config_dir);
+        assert!(reloaded.can_save);
+        assert!(reloaded.recovery_warning.is_none());
+        assert_eq!(reloaded.settings.mkvmerge_path, "/custom/bin/mkvmerge");
         assert_eq!(
             std::fs::read_dir(&config_dir)
                 .unwrap()
@@ -1340,8 +1347,10 @@ mod tests {
         let config_dir = temporary_config_dir();
         std::fs::create_dir_all(&config_dir).unwrap();
         let settings_path = config_dir.join("settings.json");
-        let previous_settings = br#"{"mkvmerge_path":"existing"}"#;
-        std::fs::write(&settings_path, previous_settings).unwrap();
+        let mut previous_settings = Settings::default();
+        previous_settings.mkvmerge_path = "/existing/bin/mkvmerge".into();
+        let previous_contents = serde_json::to_vec(&previous_settings).unwrap();
+        std::fs::write(&settings_path, &previous_contents).unwrap();
 
         let error = write_settings_atomically_with(
             &settings_path,
@@ -1356,7 +1365,11 @@ mod tests {
         .unwrap_err();
 
         assert!(error.contains("simulated replacement failure"));
-        assert_eq!(std::fs::read(&settings_path).unwrap(), previous_settings);
+        assert_eq!(std::fs::read(&settings_path).unwrap(), previous_contents);
+        let reloaded = Settings::load_with_recovery(&config_dir);
+        assert!(reloaded.can_save);
+        assert!(reloaded.recovery_warning.is_none());
+        assert_eq!(reloaded.settings.mkvmerge_path, "/existing/bin/mkvmerge");
         assert_eq!(
             std::fs::read_dir(&config_dir)
                 .unwrap()
