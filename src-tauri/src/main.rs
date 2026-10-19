@@ -284,6 +284,7 @@ async fn create_project(
         status: ProjectStatus::Pending,
         progress: 0.0,
         current_file: None,
+        completed_files: Vec::new(),
         created_at: chrono::Utc::now(),
         error: None,
     };
@@ -493,7 +494,7 @@ async fn run_mux_queue(window: Window, state: AppStateType, muxer_state: Arc<Mut
                     "mux-progress",
                     MuxProgress {
                         project_id: project.id.clone(),
-                        progress: 0.0,
+                        progress: project.progress_for_completed_files(),
                         current_file: None,
                         status: "processing".into(),
                     },
@@ -505,105 +506,178 @@ async fn run_mux_queue(window: Window, state: AppStateType, muxer_state: Arc<Mut
                     app_state.settings.clone()
                 };
 
-                let total_files: usize = project.volumes.iter().map(|v| v.files.len()).sum();
-                let mut processed_files = 0;
+                let files: Vec<_> = project
+                    .volumes
+                    .iter()
+                    .flat_map(|volume| &volume.files)
+                    .collect();
+                let total_files = files.len();
+                let mut processed_files = project.completed_file_count();
+                let mut failed_files = Vec::new();
+                let first_unfinished_index = project.first_unfinished_file_index();
 
-                for volume in &project.volumes {
-                    for file in &volume.files {
-                        // Check pause/stop — drop guard before every await
-                        loop {
-                            let (is_running, is_paused) = {
-                                let muxer = muxer_state.lock();
-                                (muxer.is_running, muxer.is_paused)
-                            };
-                            if !is_running {
-                                return;
-                            }
-                            if !is_paused {
-                                break;
-                            }
-                            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-                        }
+                for (file_index, file) in files.into_iter().enumerate() {
+                    if first_unfinished_index
+                        .map(|first_unfinished| file_index < first_unfinished)
+                        .unwrap_or(true)
+                    {
+                        continue;
+                    }
+                    if project.is_file_completed(&file.path) {
+                        continue;
+                    }
 
-                        // Determine output path
-                        let subfolder = match file.category.as_str() {
-                            "EPISODE" => "Episode",
-                            _ => "Extra",
+                    // Check pause/stop — drop guard before every await
+                    loop {
+                        let (is_running, is_paused) = {
+                            let muxer = muxer_state.lock();
+                            (muxer.is_running, muxer.is_paused)
                         };
-
-                        let output_filename = generate_output_filename(file, &project.output_name);
-                        let output_dir = PathBuf::from(&project.output_path)
-                            .join(&project.output_name)
-                            .join(subfolder);
-
-                        // Create output directory
-                        if let Err(e) = tokio::fs::create_dir_all(&output_dir).await {
-                            eprintln!("Failed to create output directory: {}", e);
-                            continue;
+                        if !is_running {
+                            return;
                         }
+                        if !is_paused {
+                            break;
+                        }
+                        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+                    }
 
-                        let output_path = output_dir.join(&output_filename);
+                    // Determine output path
+                    let subfolder = match file.category.as_str() {
+                        "EPISODE" => "Episode",
+                        _ => "Extra",
+                    };
 
-                        // Update current file
-                        {
+                    let output_filename = generate_output_filename(file, &project.output_name);
+                    let output_dir = PathBuf::from(&project.output_path)
+                        .join(&project.output_name)
+                        .join(subfolder);
+
+                    // Create output directory
+                    if let Err(e) = tokio::fs::create_dir_all(&output_dir).await {
+                        eprintln!("Failed to create output directory: {}", e);
+                        failed_files.push(format!("{}: {}", file.filename, e));
+                        continue;
+                    }
+
+                    let output_path = output_dir.join(&output_filename);
+
+                    // Update current file
+                    {
+                        let mut app_state = state.lock();
+                        if let Some(p) = app_state.queue.iter_mut().find(|p| p.id == project.id) {
+                            p.current_file = Some(file.filename.clone());
+                            p.progress = if total_files == 0 {
+                                0.0
+                            } else {
+                                (processed_files as f64 / total_files as f64) * 100.0
+                            };
+                        }
+                        persist_from_mux(&window, &app_state);
+                    }
+
+                    // Emit progress
+                    let _ = window.emit(
+                        "mux-progress",
+                        MuxProgress {
+                            project_id: project.id.clone(),
+                            progress: (processed_files as f64 / total_files as f64) * 100.0,
+                            current_file: Some(file.filename.clone()),
+                            status: "processing".into(),
+                        },
+                    );
+
+                    // Run mkvmerge
+                    let job = MuxJob {
+                        input_path: file.path.clone(),
+                        output_path: output_path.to_string_lossy().to_string(),
+                        chapter_path: file.chapter_file.clone(),
+                        tracks: file.tracks.clone(),
+                    };
+
+                    match Muxer::run_mkvmerge(&settings.mkvmerge_path, &job).await {
+                        Ok(()) => {
+                            processed_files += 1;
                             let mut app_state = state.lock();
                             if let Some(p) = app_state.queue.iter_mut().find(|p| p.id == project.id)
                             {
-                                p.current_file = Some(file.filename.clone());
+                                if !p.completed_files.contains(&file.path) {
+                                    p.completed_files.push(file.path.clone());
+                                }
                                 p.progress = if total_files == 0 {
                                     0.0
                                 } else {
                                     (processed_files as f64 / total_files as f64) * 100.0
                                 };
+                                p.current_file = None;
                             }
                             persist_from_mux(&window, &app_state);
+                            let _ = window.emit(
+                                "mux-progress",
+                                MuxProgress {
+                                    project_id: project.id.clone(),
+                                    progress: if total_files == 0 {
+                                        0.0
+                                    } else {
+                                        (processed_files as f64 / total_files as f64) * 100.0
+                                    },
+                                    current_file: None,
+                                    status: "processing".into(),
+                                },
+                            );
                         }
-
-                        // Emit progress
-                        let _ = window.emit(
-                            "mux-progress",
-                            MuxProgress {
-                                project_id: project.id.clone(),
-                                progress: (processed_files as f64 / total_files as f64) * 100.0,
-                                current_file: Some(file.filename.clone()),
-                                status: "processing".into(),
-                            },
-                        );
-
-                        // Run mkvmerge
-                        let job = MuxJob {
-                            input_path: file.path.clone(),
-                            output_path: output_path.to_string_lossy().to_string(),
-                            chapter_path: file.chapter_file.clone(),
-                            tracks: file.tracks.clone(),
-                        };
-
-                        if let Err(e) = Muxer::run_mkvmerge(&settings.mkvmerge_path, &job).await {
+                        Err(e) => {
                             eprintln!("Muxing failed for {}: {}", file.filename, e);
+                            failed_files.push(format!("{}: {}", file.filename, e));
                         }
-
-                        processed_files += 1;
                     }
                 }
 
-                // Mark project as complete
+                // Mark the project complete only when all its source files succeeded.
                 {
                     let mut app_state = state.lock();
                     if let Some(p) = app_state.queue.iter_mut().find(|p| p.id == project.id) {
-                        p.status = ProjectStatus::Complete;
-                        p.progress = 100.0;
-                        p.current_file = None;
+                        if failed_files.is_empty() && processed_files == total_files {
+                            p.status = ProjectStatus::Complete;
+                            p.progress = 100.0;
+                            p.current_file = None;
+                            p.error = None;
+                        } else {
+                            p.status = ProjectStatus::Error;
+                            p.progress = if total_files == 0 {
+                                0.0
+                            } else {
+                                (processed_files as f64 / total_files as f64) * 100.0
+                            };
+                            p.error = Some(format!(
+                                "Some source files could not be processed: {}",
+                                failed_files.join("; ")
+                            ));
+                        }
                     }
                     persist_from_mux(&window, &app_state);
                 }
 
+                let (final_status, final_progress) =
+                    if failed_files.is_empty() && processed_files == total_files {
+                        ("complete", 100.0)
+                    } else {
+                        (
+                            "error",
+                            if total_files == 0 {
+                                0.0
+                            } else {
+                                (processed_files as f64 / total_files as f64) * 100.0
+                            },
+                        )
+                    };
                 let _ = window.emit(
                     "mux-progress",
                     MuxProgress {
                         project_id: project.id.clone(),
-                        progress: 100.0,
+                        progress: final_progress,
                         current_file: None,
-                        status: "complete".into(),
+                        status: final_status.into(),
                     },
                 );
             }

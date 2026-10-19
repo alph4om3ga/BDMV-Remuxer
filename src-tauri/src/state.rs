@@ -256,8 +256,48 @@ pub struct Project {
     pub status: ProjectStatus,
     pub progress: f64,
     pub current_file: Option<String>,
+    #[serde(default)]
+    pub completed_files: Vec<String>,
     pub created_at: DateTime<Utc>,
     pub error: Option<String>,
+}
+
+impl Project {
+    pub fn is_file_completed(&self, file_path: &str) -> bool {
+        self.completed_files
+            .iter()
+            .any(|completed| completed == file_path)
+    }
+
+    pub fn first_unfinished_file_index(&self) -> Option<usize> {
+        self.volumes
+            .iter()
+            .flat_map(|volume| &volume.files)
+            .enumerate()
+            .find(|(_, file)| !self.is_file_completed(&file.path))
+            .map(|(index, _)| index)
+    }
+
+    pub fn completed_file_count(&self) -> usize {
+        self.volumes
+            .iter()
+            .flat_map(|volume| &volume.files)
+            .filter(|file| self.is_file_completed(&file.path))
+            .count()
+    }
+
+    pub fn total_file_count(&self) -> usize {
+        self.volumes.iter().map(|volume| volume.files.len()).sum()
+    }
+
+    pub fn progress_for_completed_files(&self) -> f64 {
+        let total_files = self.total_file_count();
+        if total_files == 0 {
+            0.0
+        } else {
+            (self.completed_file_count() as f64 / total_files as f64) * 100.0
+        }
+    }
 }
 
 // ============================================================================
@@ -308,6 +348,9 @@ impl AppState {
                 ProjectStatus::Pending | ProjectStatus::Processing
             ) {
                 project.status = ProjectStatus::Paused;
+            }
+            if project.status != ProjectStatus::Complete {
+                project.progress = project.progress_for_completed_files();
             }
         }
 
@@ -364,6 +407,23 @@ mod tests {
             std::process::id(),
             timestamp
         ))
+    }
+
+    fn test_media_file(filename: &str) -> crate::bdmv::MediaFile {
+        crate::bdmv::MediaFile {
+            id: filename.into(),
+            filename: filename.into(),
+            path: format!("/disc/BDMV/STREAM/{filename}"),
+            duration: 0.0,
+            size: 0,
+            category: "EPISODE".into(),
+            tracks: Vec::new(),
+            episode_number: None,
+            op_number: None,
+            ed_number: None,
+            special_number: None,
+            chapter_file: None,
+        }
     }
 
     #[test]
@@ -529,7 +589,11 @@ mod tests {
             id: "volume-1".into(),
             name: "Disc 1".into(),
             volume_number: 1,
-            files: Vec::new(),
+            files: vec![
+                test_media_file("00000.m2ts"),
+                test_media_file("00001.m2ts"),
+                test_media_file("00002.m2ts"),
+            ],
         };
         let track = Track {
             id: 2,
@@ -549,8 +613,9 @@ mod tests {
             volumes: vec![volume.clone()],
             track_templates: HashMap::new(),
             status: ProjectStatus::Processing,
-            progress: 35.0,
+            progress: 89.0,
             current_file: Some("00001.m2ts".into()),
+            completed_files: vec!["/disc/BDMV/STREAM/00000.m2ts".into()],
             created_at: Utc::now(),
             error: None,
         };
@@ -573,13 +638,109 @@ mod tests {
             "Edited track name"
         );
         assert_eq!(restored.queue[0].status, ProjectStatus::Paused);
-        assert_eq!(restored.queue[0].progress, 35.0);
+        assert!((restored.queue[0].progress - 100.0 / 3.0).abs() < 0.001);
         assert_eq!(
             restored.queue[0].current_file.as_deref(),
             Some("00001.m2ts")
         );
+        assert_eq!(
+            restored.queue[0].completed_files,
+            vec!["/disc/BDMV/STREAM/00000.m2ts"]
+        );
+        assert_eq!(restored.queue[0].first_unfinished_file_index(), Some(1));
+        assert_eq!(restored.queue[0].completed_file_count(), 1);
 
         std::fs::remove_dir_all(config_dir).unwrap();
+    }
+
+    #[test]
+    fn resume_progress_counts_completed_paths_at_the_beginning_middle_and_end() {
+        use crate::bdmv::MediaFile;
+
+        let make_file = |filename: &str| MediaFile {
+            id: filename.into(),
+            filename: filename.into(),
+            path: format!("/disc/BDMV/STREAM/{filename}"),
+            duration: 0.0,
+            size: 0,
+            category: "EPISODE".into(),
+            tracks: Vec::new(),
+            episode_number: None,
+            op_number: None,
+            ed_number: None,
+            special_number: None,
+            chapter_file: None,
+        };
+        let mut project = Project {
+            id: "resume-project".into(),
+            output_name: "Show".into(),
+            output_path: "/output".into(),
+            volumes: vec![Volume {
+                id: "volume-1".into(),
+                name: "Disc 1".into(),
+                volume_number: 1,
+                files: vec![
+                    make_file("00001.m2ts"),
+                    make_file("00002.m2ts"),
+                    make_file("00003.m2ts"),
+                ],
+            }],
+            track_templates: HashMap::new(),
+            status: ProjectStatus::Paused,
+            progress: 0.0,
+            current_file: None,
+            completed_files: Vec::new(),
+            created_at: Utc::now(),
+            error: None,
+        };
+
+        assert_eq!(project.completed_file_count(), 0);
+        assert_eq!(project.progress_for_completed_files(), 0.0);
+        assert_eq!(project.first_unfinished_file_index(), Some(0));
+        assert!(!project.is_file_completed("/disc/BDMV/STREAM/00001.m2ts"));
+
+        project
+            .completed_files
+            .push("/disc/BDMV/STREAM/00001.m2ts".into());
+        assert_eq!(project.completed_file_count(), 1);
+        assert_eq!(project.first_unfinished_file_index(), Some(1));
+        assert!((project.progress_for_completed_files() - 100.0 / 3.0).abs() < 0.001);
+        assert!(project.is_file_completed("/disc/BDMV/STREAM/00001.m2ts"));
+        assert!(!project.is_file_completed("/disc/BDMV/STREAM/00002.m2ts"));
+
+        project.completed_files.extend([
+            "/disc/BDMV/STREAM/00002.m2ts".into(),
+            "/disc/BDMV/STREAM/00003.m2ts".into(),
+        ]);
+        assert_eq!(project.completed_file_count(), 3);
+        assert_eq!(project.first_unfinished_file_index(), None);
+        assert_eq!(project.progress_for_completed_files(), 100.0);
+        assert!(project
+            .volumes
+            .iter()
+            .flat_map(|volume| &volume.files)
+            .all(|file| project.is_file_completed(&file.path)));
+    }
+
+    #[test]
+    fn older_saved_projects_without_completed_files_load_with_an_empty_resume_marker() {
+        let project: Project = serde_json::from_str(
+            r#"{
+                "id": "legacy-project",
+                "output_name": "Show",
+                "output_path": "/output",
+                "volumes": [],
+                "track_templates": {},
+                "status": "paused",
+                "progress": 0.0,
+                "current_file": null,
+                "created_at": "2024-01-01T00:00:00Z",
+                "error": null
+            }"#,
+        )
+        .unwrap();
+
+        assert!(project.completed_files.is_empty());
     }
 
     #[test]
