@@ -1,9 +1,10 @@
 use crate::bdmv::{Track, Volume};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
-use std::io::{ErrorKind, Write};
+use std::io::{ErrorKind, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -371,16 +372,92 @@ pub struct Project {
     pub progress: f64,
     pub current_file: Option<String>,
     #[serde(default)]
-    pub completed_files: Vec<String>,
+    pub completed_files: Vec<CompletedFile>,
     pub created_at: DateTime<Utc>,
     pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct CompletedFile {
+    pub path: String,
+    pub fingerprint: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum CompletedFileRecord {
+    Legacy(String),
+    Current {
+        path: String,
+        #[serde(default)]
+        fingerprint: Option<String>,
+    },
+}
+
+impl<'de> Deserialize<'de> for CompletedFile {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        Ok(match CompletedFileRecord::deserialize(deserializer)? {
+            CompletedFileRecord::Legacy(path) => Self {
+                path,
+                fingerprint: None,
+            },
+            CompletedFileRecord::Current { path, fingerprint } => Self { path, fingerprint },
+        })
+    }
+}
+
+pub fn source_file_fingerprint(file_path: &str) -> Result<String, String> {
+    let mut file = fs::File::open(file_path)
+        .map_err(|error| format!("Failed to read source file {}: {}", file_path, error))?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0; 64 * 1024];
+
+    loop {
+        let bytes_read = file
+            .read(&mut buffer)
+            .map_err(|error| format!("Failed to read source file {}: {}", file_path, error))?;
+        if bytes_read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..bytes_read]);
+    }
+
+    Ok(format!("{:x}", hasher.finalize()))
 }
 
 impl Project {
     pub fn is_file_completed(&self, file_path: &str) -> bool {
         self.completed_files
             .iter()
-            .any(|completed| completed == file_path)
+            .any(|completed| completed.path == file_path)
+    }
+
+    pub fn retain_completed_files_matching(&mut self, fingerprints: &HashMap<String, String>) {
+        self.completed_files.retain(|completed| {
+            completed.fingerprint.as_ref().is_some_and(|fingerprint| {
+                fingerprints
+                    .get(&completed.path)
+                    .is_some_and(|current| current == fingerprint)
+            })
+        });
+    }
+
+    pub fn mark_file_completed(&mut self, file_path: &str, fingerprint: String) {
+        if let Some(completed) = self
+            .completed_files
+            .iter_mut()
+            .find(|completed| completed.path == file_path)
+        {
+            completed.fingerprint = Some(fingerprint);
+        } else {
+            self.completed_files.push(CompletedFile {
+                path: file_path.to_string(),
+                fingerprint: Some(fingerprint),
+            });
+        }
     }
 
     pub fn first_unfinished_file_index(&self) -> Option<usize> {
@@ -536,8 +613,9 @@ impl AppState {
 #[cfg(test)]
 mod tests {
     use super::{
-        settings_directory_for_config_root, write_settings_atomically_with, AppState, Project,
-        ProjectStatus, Settings, WorkspaceData,
+        settings_directory_for_config_root, source_file_fingerprint,
+        write_settings_atomically_with, AppState, CompletedFile, Project, ProjectStatus, Settings,
+        WorkspaceData,
     };
     use crate::bdmv::{Track, Volume};
     use chrono::Utc;
@@ -867,7 +945,10 @@ mod tests {
             status: ProjectStatus::Processing,
             progress: 89.0,
             current_file: Some("00001.m2ts".into()),
-            completed_files: vec!["/disc/BDMV/STREAM/00000.m2ts".into()],
+            completed_files: vec![CompletedFile {
+                path: "/disc/BDMV/STREAM/00000.m2ts".into(),
+                fingerprint: Some("sha256:fixture".into()),
+            }],
             created_at: Utc::now(),
             error: None,
         };
@@ -897,7 +978,10 @@ mod tests {
         );
         assert_eq!(
             restored.queue[0].completed_files,
-            vec!["/disc/BDMV/STREAM/00000.m2ts"]
+            vec![CompletedFile {
+                path: "/disc/BDMV/STREAM/00000.m2ts".into(),
+                fingerprint: Some("sha256:fixture".into()),
+            }]
         );
         assert_eq!(restored.queue[0].first_unfinished_file_index(), Some(1));
         assert_eq!(restored.queue[0].completed_file_count(), 1);
@@ -987,9 +1071,7 @@ mod tests {
         assert_eq!(project.first_unfinished_file_index(), Some(0));
         assert!(!project.is_file_completed("/disc/BDMV/STREAM/00001.m2ts"));
 
-        project
-            .completed_files
-            .push("/disc/BDMV/STREAM/00001.m2ts".into());
+        project.mark_file_completed("/disc/BDMV/STREAM/00001.m2ts", "fingerprint-1".into());
         assert_eq!(project.completed_file_count(), 1);
         assert_eq!(project.first_unfinished_file_index(), Some(1));
         assert!((project.progress_for_completed_files() - 100.0 / 3.0).abs() < 0.001);
@@ -1007,14 +1089,15 @@ mod tests {
         assert_eq!(project.error, None);
         assert_eq!(
             project.completed_files,
-            vec!["/disc/BDMV/STREAM/00001.m2ts"]
+            vec![CompletedFile {
+                path: "/disc/BDMV/STREAM/00001.m2ts".into(),
+                fingerprint: Some("fingerprint-1".into()),
+            }]
         );
         assert!((project.progress - 100.0 / 3.0).abs() < 0.001);
 
-        project.completed_files.extend([
-            "/disc/BDMV/STREAM/00002.m2ts".into(),
-            "/disc/BDMV/STREAM/00003.m2ts".into(),
-        ]);
+        project.mark_file_completed("/disc/BDMV/STREAM/00002.m2ts", "fingerprint-2".into());
+        project.mark_file_completed("/disc/BDMV/STREAM/00003.m2ts", "fingerprint-3".into());
         assert_eq!(project.completed_file_count(), 3);
         assert_eq!(project.first_unfinished_file_index(), None);
         assert_eq!(project.progress_for_completed_files(), 100.0);
@@ -1023,6 +1106,93 @@ mod tests {
             .iter()
             .flat_map(|volume| &volume.files)
             .all(|file| project.is_file_completed(&file.path)));
+    }
+
+    #[test]
+    fn replaced_source_at_same_path_is_unfinished_on_resume() {
+        let source_path = temporary_config_dir().join("source.m2ts");
+        std::fs::create_dir_all(source_path.parent().unwrap()).unwrap();
+        std::fs::write(&source_path, b"original file bytes").unwrap();
+        let source_path = source_path.to_string_lossy().into_owned();
+        let original_fingerprint = source_file_fingerprint(&source_path).unwrap();
+        let mut file = test_media_file("source.m2ts");
+        file.path = source_path.clone();
+        let mut project = Project {
+            id: "replacement-resume".into(),
+            output_name: "Show".into(),
+            output_path: "/output".into(),
+            volumes: vec![Volume {
+                id: "volume-1".into(),
+                name: "Disc 1".into(),
+                volume_number: 1,
+                files: vec![file],
+            }],
+            track_templates: HashMap::new(),
+            status: ProjectStatus::Paused,
+            progress: 100.0,
+            current_file: None,
+            completed_files: vec![CompletedFile {
+                path: source_path.clone(),
+                fingerprint: Some(original_fingerprint.clone()),
+            }],
+            created_at: Utc::now(),
+            error: None,
+        };
+
+        // Replace the contents without changing the source path.
+        std::fs::write(&source_path, b"replaced file bytes").unwrap();
+        let fingerprints = HashMap::from([(
+            source_path.clone(),
+            source_file_fingerprint(&source_path).unwrap(),
+        )]);
+        assert_ne!(fingerprints[&source_path], original_fingerprint);
+        project.retain_completed_files_matching(&fingerprints);
+
+        assert_eq!(project.completed_file_count(), 0);
+        assert_eq!(project.first_unfinished_file_index(), Some(0));
+        std::fs::remove_dir_all(std::path::Path::new(&source_path).parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn unchanged_source_remains_completed_on_resume() {
+        let source_path = temporary_config_dir().join("source.m2ts");
+        std::fs::create_dir_all(source_path.parent().unwrap()).unwrap();
+        std::fs::write(&source_path, b"unchanged file bytes").unwrap();
+        let source_path = source_path.to_string_lossy().into_owned();
+        let fingerprint = source_file_fingerprint(&source_path).unwrap();
+        let mut file = test_media_file("source.m2ts");
+        file.path = source_path.clone();
+        let mut project = Project {
+            id: "unchanged-resume".into(),
+            output_name: "Show".into(),
+            output_path: "/output".into(),
+            volumes: vec![Volume {
+                id: "volume-1".into(),
+                name: "Disc 1".into(),
+                volume_number: 1,
+                files: vec![file],
+            }],
+            track_templates: HashMap::new(),
+            status: ProjectStatus::Paused,
+            progress: 100.0,
+            current_file: None,
+            completed_files: vec![CompletedFile {
+                path: source_path.clone(),
+                fingerprint: Some(fingerprint.clone()),
+            }],
+            created_at: Utc::now(),
+            error: None,
+        };
+
+        project.retain_completed_files_matching(&HashMap::from([(
+            source_path.clone(),
+            source_file_fingerprint(&source_path).unwrap(),
+        )]));
+
+        assert_eq!(project.completed_file_count(), 1);
+        assert_eq!(project.first_unfinished_file_index(), None);
+        assert!(project.is_file_completed(&source_path));
+        std::fs::remove_dir_all(std::path::Path::new(&source_path).parent().unwrap()).unwrap();
     }
 
     #[test]
@@ -1043,6 +1213,30 @@ mod tests {
         )
         .unwrap();
 
+        assert!(project.completed_files.is_empty());
+    }
+
+    #[test]
+    fn old_path_only_completion_markers_load_without_trusting_missing_fingerprints() {
+        let mut project: Project = serde_json::from_str(
+            r#"{
+                "id": "legacy-project",
+                "output_name": "Show",
+                "output_path": "/output",
+                "volumes": [],
+                "track_templates": {},
+                "status": "paused",
+                "progress": 0.0,
+                "current_file": null,
+                "completed_files": ["/disc/BDMV/STREAM/00001.m2ts"],
+                "created_at": "2024-01-01T00:00:00Z",
+                "error": null
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(project.completed_files[0].fingerprint, None);
+        project.retain_completed_files_matching(&HashMap::new());
         assert!(project.completed_files.is_empty());
     }
 

@@ -51,7 +51,7 @@ export interface Project {
   status: ProjectStatus;
   progress: number;
   current_file?: string;
-  completed_files: string[];
+  completed_files: Array<{ path: string; fingerprint: string | null }>;
   created_at: string;
   error?: string | null;
 }

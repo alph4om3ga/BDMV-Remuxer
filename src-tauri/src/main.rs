@@ -9,7 +9,8 @@ mod tool_error;
 use crate::bdmv::{BdmvParser, MediaFile, Track, Volume};
 use crate::muxer::{MuxJob, MuxProgress, Muxer};
 use crate::state::{
-    settings_directory_for_config_root, AppState, Project, ProjectStatus, Settings,
+    settings_directory_for_config_root, source_file_fingerprint, AppState, Project, ProjectStatus,
+    Settings,
 };
 use parking_lot::Mutex;
 use serde::Serialize;
@@ -497,12 +498,34 @@ async fn run_mux_queue(window: Window, state: AppStateType, muxer_state: Arc<Mut
         };
 
         match project {
-            Some(project) => {
+            Some(mut project) => {
+                // Reconcile saved completion markers with the current source contents.
+                let completed_source_paths: Vec<String> = project
+                    .completed_files
+                    .iter()
+                    .map(|completed| completed.path.clone())
+                    .collect();
+                let current_fingerprints = tokio::task::spawn_blocking(move || {
+                    completed_source_paths
+                        .into_iter()
+                        .filter_map(|path| {
+                            source_file_fingerprint(&path)
+                                .ok()
+                                .map(|fingerprint| (path, fingerprint))
+                        })
+                        .collect::<HashMap<_, _>>()
+                })
+                .await
+                .unwrap_or_default();
+                project.retain_completed_files_matching(&current_fingerprints);
+
                 // Update status to processing
                 {
                     let mut app_state = state.lock();
                     if let Some(p) = app_state.queue.iter_mut().find(|p| p.id == project.id) {
                         p.status = ProjectStatus::Processing;
+                        p.completed_files = project.completed_files.clone();
+                        p.progress = project.progress_for_completed_files();
                     }
                     persist_from_mux(&window, &app_state);
                 }
@@ -615,15 +638,33 @@ async fn run_mux_queue(window: Window, state: AppStateType, muxer_state: Arc<Mut
                         tracks: file.tracks.clone(),
                     };
 
+                    let source_path = file.path.clone();
+                    let source_fingerprint = match tokio::task::spawn_blocking(move || {
+                        source_file_fingerprint(&source_path)
+                    })
+                    .await
+                    {
+                        Ok(Ok(fingerprint)) => fingerprint,
+                        Ok(Err(error)) => {
+                            failed_files.push(format!("{}: {}", file.filename, error));
+                            continue;
+                        }
+                        Err(error) => {
+                            failed_files.push(format!(
+                                "{}: Failed to verify source file: {}",
+                                file.filename, error
+                            ));
+                            continue;
+                        }
+                    };
+
                     match Muxer::run_mkvmerge(&settings.mkvmerge_path, &job).await {
                         Ok(()) => {
                             processed_files += 1;
                             let mut app_state = state.lock();
                             if let Some(p) = app_state.queue.iter_mut().find(|p| p.id == project.id)
                             {
-                                if !p.completed_files.contains(&file.path) {
-                                    p.completed_files.push(file.path.clone());
-                                }
+                                p.mark_file_completed(&file.path, source_fingerprint);
                                 p.progress = if total_files == 0 {
                                     0.0
                                 } else {
