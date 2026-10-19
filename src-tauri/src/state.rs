@@ -2,9 +2,10 @@ use crate::bdmv::{Track, Volume};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::fs;
+use std::fs::{self, OpenOptions};
 use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 // ============================================================================
 // Settings
@@ -115,8 +116,115 @@ impl Settings {
         let path = config_dir.join(Self::FILE_NAME);
         let contents = serde_json::to_vec_pretty(self)
             .map_err(|error| format!("Failed to serialize settings: {}", error))?;
-        fs::write(&path, contents)
-            .map_err(|error| format!("Failed to write settings at {}: {}", path.display(), error))
+        write_settings_atomically(&path, &contents)
+    }
+}
+
+fn write_settings_atomically(path: &Path, contents: &[u8]) -> Result<(), String> {
+    write_settings_atomically_with(path, contents, replace_file)
+}
+
+fn write_settings_atomically_with(
+    path: &Path,
+    contents: &[u8],
+    replace: impl FnOnce(&Path, &Path) -> std::io::Result<()>,
+) -> Result<(), String> {
+    static TEMP_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let file_name = path
+        .file_name()
+        .unwrap_or_else(|| std::ffi::OsStr::new("settings"));
+    let (temporary_path, mut temporary_file) = loop {
+        let counter = TEMP_FILE_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let temporary_path = parent.join(format!(
+            ".{}.tmp-{}-{}",
+            file_name.to_string_lossy(),
+            std::process::id(),
+            counter
+        ));
+        match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary_path)
+        {
+            Ok(file) => break (temporary_path, file),
+            Err(error) if error.kind() == ErrorKind::AlreadyExists => continue,
+            Err(error) => {
+                return Err(format!(
+                    "Failed to create temporary settings file beside {}: {}",
+                    path.display(),
+                    error
+                ));
+            }
+        }
+    };
+
+    if let Err(error) = temporary_file
+        .write_all(contents)
+        .and_then(|()| temporary_file.sync_all())
+    {
+        drop(temporary_file);
+        let _ = fs::remove_file(&temporary_path);
+        return Err(format!(
+            "Failed to write temporary settings file for {}: {}",
+            path.display(),
+            error
+        ));
+    }
+    drop(temporary_file);
+
+    if let Err(error) = replace(&temporary_path, path) {
+        let _ = fs::remove_file(&temporary_path);
+        return Err(format!(
+            "Failed to replace settings at {}: {}",
+            path.display(),
+            error
+        ));
+    }
+
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn replace_file(source: &Path, destination: &Path) -> std::io::Result<()> {
+    fs::rename(source, destination)
+}
+
+#[cfg(windows)]
+fn replace_file(source: &Path, destination: &Path) -> std::io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+
+    const MOVEFILE_REPLACE_EXISTING: u32 = 0x0000_0001;
+    const MOVEFILE_WRITE_THROUGH: u32 = 0x0000_0008;
+
+    #[link(name = "Kernel32")]
+    extern "system" {
+        fn MoveFileExW(
+            existing_file_name: *const u16,
+            new_file_name: *const u16,
+            flags: u32,
+        ) -> i32;
+    }
+
+    let source: Vec<u16> = source.as_os_str().encode_wide().chain(Some(0)).collect();
+    let destination: Vec<u16> = destination
+        .as_os_str()
+        .encode_wide()
+        .chain(Some(0))
+        .collect();
+    let succeeded = unsafe {
+        MoveFileExW(
+            source.as_ptr(),
+            destination.as_ptr(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    };
+
+    if succeeded == 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(())
     }
 }
 
@@ -421,8 +529,8 @@ impl AppState {
 #[cfg(test)]
 mod tests {
     use super::{
-        settings_directory_for_config_root, AppState, Project, ProjectStatus, Settings,
-        WorkspaceData,
+        settings_directory_for_config_root, write_settings_atomically_with, AppState, Project,
+        ProjectStatus, Settings, WorkspaceData,
     };
     use crate::bdmv::{Track, Volume};
     use chrono::Utc;
@@ -654,6 +762,66 @@ mod tests {
         assert_eq!(
             serde_json::to_value(restarted_load.settings).unwrap(),
             serde_json::to_value(settings).unwrap()
+        );
+
+        std::fs::remove_dir_all(config_dir).unwrap();
+    }
+
+    #[test]
+    fn saving_settings_replaces_existing_file_and_cleans_up_temporary_file() {
+        let config_dir = temporary_config_dir();
+        std::fs::create_dir_all(&config_dir).unwrap();
+        let settings_path = config_dir.join("settings.json");
+        std::fs::write(&settings_path, "previous settings").unwrap();
+
+        let mut settings = Settings::default();
+        settings.mkvmerge_path = "/custom/bin/mkvmerge".into();
+        settings.save_to_config_dir(&config_dir).unwrap();
+
+        let saved: Settings =
+            serde_json::from_slice(&std::fs::read(&settings_path).unwrap()).unwrap();
+        assert_eq!(saved.mkvmerge_path, "/custom/bin/mkvmerge");
+        assert_eq!(
+            std::fs::read_dir(&config_dir)
+                .unwrap()
+                .filter_map(Result::ok)
+                .count(),
+            1,
+            "temporary settings file should be removed after replacement"
+        );
+
+        std::fs::remove_dir_all(config_dir).unwrap();
+    }
+
+    #[test]
+    fn failed_settings_replacement_preserves_existing_file_and_cleans_up_temporary_file() {
+        let config_dir = temporary_config_dir();
+        std::fs::create_dir_all(&config_dir).unwrap();
+        let settings_path = config_dir.join("settings.json");
+        let previous_settings = br#"{"mkvmerge_path":"existing"}"#;
+        std::fs::write(&settings_path, previous_settings).unwrap();
+
+        let error = write_settings_atomically_with(
+            &settings_path,
+            br#"{"mkvmerge_path":"new"}"#,
+            |_, _| {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "simulated replacement failure",
+                ))
+            },
+        )
+        .unwrap_err();
+
+        assert!(error.contains("simulated replacement failure"));
+        assert_eq!(std::fs::read(&settings_path).unwrap(), previous_settings);
+        assert_eq!(
+            std::fs::read_dir(&config_dir)
+                .unwrap()
+                .filter_map(Result::ok)
+                .count(),
+            1,
+            "temporary settings file should be removed after failed replacement"
         );
 
         std::fs::remove_dir_all(config_dir).unwrap();
