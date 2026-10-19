@@ -180,9 +180,16 @@ interface QueueItemProps {
   isActive: boolean;
   onRemove: () => void;
   onRetry: () => void;
+  onChangeOutputPath: () => void;
 }
 
-const QueueItem: React.FC<QueueItemProps> = ({ project, isActive, onRemove, onRetry }) => {
+const QueueItem: React.FC<QueueItemProps> = ({
+  project,
+  isActive,
+  onRemove,
+  onRetry,
+  onChangeOutputPath,
+}) => {
   const statusColors: Record<string, string> = {
     pending: '#94a3b8',
     processing: '#4ade80',
@@ -216,11 +223,26 @@ const QueueItem: React.FC<QueueItemProps> = ({ project, isActive, onRemove, onRe
         {project.error && (
           <div className="queue-error-detail" title={project.error}>{project.error}</div>
         )}
+        {project.status === 'error' && (
+          <div className="queue-output-path" title={project.output_path}>
+            Output: {project.output_path}
+          </div>
+        )}
       </div>
       {project.status === 'error' && (
-        <button className="queue-retry" onClick={onRetry} title="Retry unfinished files">
-          <RotateCw size={14} /> Retry
-        </button>
+        <div className="queue-error-actions">
+          <button
+            className="queue-change-output"
+            onClick={onChangeOutputPath}
+            title="Change output folder before retrying"
+            aria-label={`Change output folder for ${project.output_name}`}
+          >
+            <FolderInput size={14} />
+          </button>
+          <button className="queue-retry" onClick={onRetry} title="Retry unfinished files">
+            <RotateCw size={14} /> Retry
+          </button>
+        </div>
       )}
       <button className="queue-remove" onClick={onRemove}>
         <X size={14} />
@@ -702,6 +724,7 @@ const App: React.FC = () => {
     toggleVolumeExpanded,
     createProject,
     removeProject,
+    changeProjectOutputPath,
     retryProject,
     startMuxing,
     pauseMuxing,
@@ -845,6 +868,7 @@ const App: React.FC = () => {
                   isActive={project.status === 'processing'}
                   onRemove={() => removeProject(project.id)}
                   onRetry={() => retryProject(project.id)}
+                  onChangeOutputPath={() => changeProjectOutputPath(project.id)}
                 />
               ))
             )}

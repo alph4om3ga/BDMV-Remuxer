@@ -64,6 +64,7 @@ interface AppStore {
   updateTrack: (volumeId: string, fileId: string, trackId: number, language: string, name: string) => Promise<void>;
   createProject: () => Promise<void>;
   removeProject: (projectId: string) => Promise<void>;
+  changeProjectOutputPath: (projectId: string) => Promise<void>;
   retryProject: (projectId: string) => Promise<void>;
   startMuxing: () => Promise<void>;
   pauseMuxing: () => Promise<void>;
@@ -235,6 +236,32 @@ export const useAppStore = create<AppStore>((set, get) => ({
     try {
       await invoke('remove_project', { projectId });
       set(state => ({ queue: state.queue.filter(p => p.id !== projectId) }));
+    } catch (e) {
+      set({ error: String(e) });
+    }
+  },
+
+  changeProjectOutputPath: async (projectId) => {
+    const project = get().queue.find(item => item.id === projectId);
+    if (!project || project.status !== 'error') return;
+
+    try {
+      const selected = await open({
+        directory: true,
+        multiple: false,
+        defaultPath: project.output_path,
+        title: 'Select output folder',
+      });
+      if (!selected || Array.isArray(selected)) return;
+
+      const updatedProject = await invoke<Project>('update_project_output_path', {
+        projectId,
+        outputPath: selected,
+      });
+      set(state => ({
+        error: null,
+        queue: state.queue.map(item => item.id === updatedProject.id ? updatedProject : item),
+      }));
     } catch (e) {
       set({ error: String(e) });
     }

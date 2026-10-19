@@ -230,6 +230,40 @@ input:focus, select:focus {
   overflow-wrap: anywhere;
 }
 
+.queue-output-path {
+  margin-top: 5px;
+  color: var(--text-muted);
+  font-size: 10px;
+  line-height: 1.35;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.queue-error-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.queue-change-output {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 5px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+
+.queue-change-output:hover {
+  background: var(--bg-base);
+  color: var(--text-primary);
+}
+
 .queue-retry {
   display: inline-flex;
   align-items: center;

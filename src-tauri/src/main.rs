@@ -318,6 +318,39 @@ async fn retry_project(
     Ok(retried_project)
 }
 
+#[tauri::command]
+async fn update_project_output_path(
+    project_id: String,
+    output_path: String,
+    state: State<'_, AppStateType>,
+) -> Result<Project, String> {
+    let mut app_state = state.lock();
+    let updated_project =
+        prepare_project_output_path_update(&mut app_state, &project_id, output_path)?;
+
+    app_state.persist_workspace()?;
+    Ok(updated_project)
+}
+
+fn prepare_project_output_path_update(
+    app_state: &mut AppState,
+    project_id: &str,
+    output_path: String,
+) -> Result<Project, String> {
+    let project = app_state
+        .queue
+        .iter_mut()
+        .find(|project| project.id == project_id)
+        .ok_or_else(|| "Project was not found in the queue".to_string())?;
+
+    if project.status != ProjectStatus::Error {
+        return Err("Only projects with an error can change their output folder".into());
+    }
+
+    project.output_path = output_path;
+    Ok(project.clone())
+}
+
 fn prepare_project_retry(app_state: &mut AppState, project_id: &str) -> Result<Project, String> {
     let project = app_state
         .queue
@@ -1223,6 +1256,7 @@ fn main() {
             // Project & Queue
             create_project,
             remove_project,
+            update_project_output_path,
             retry_project,
             get_queue,
             get_current_volumes,
@@ -1434,7 +1468,10 @@ mod close_tests {
 
 #[cfg(test)]
 mod queue_retry_tests {
-    use super::{ensure_muxer_idle, prepare_project_retry, queue_action, QueueAction};
+    use super::{
+        ensure_muxer_idle, prepare_project_output_path_update, prepare_project_retry, queue_action,
+        QueueAction,
+    };
     use crate::bdmv::{MediaFile, Volume};
     use crate::muxer::Muxer;
     use crate::state::{AppState, CompletedFile, Project, ProjectStatus};
@@ -1518,6 +1555,33 @@ mod queue_retry_tests {
             "the queued project must retain the same successful-file markers"
         );
         assert_eq!(state.queue[1].progress, 50.0);
+    }
+
+    #[test]
+    fn changing_failed_project_output_keeps_completed_markers_and_retry_starts_at_unfinished_file() {
+        let mut state = retry_state();
+        let completed_files = state.queue[1].completed_files.clone();
+        let active_output_path = state.queue[0].output_path.clone();
+        assert_eq!(
+            prepare_project_output_path_update(&mut state, "active-project", "/wrong".into())
+                .unwrap_err(),
+            "Only projects with an error can change their output folder"
+        );
+        assert_eq!(state.queue[0].output_path, active_output_path);
+
+        let updated =
+            prepare_project_output_path_update(&mut state, "failed-project", "/new-output".into())
+                .unwrap();
+
+        assert_eq!(updated.output_path, "/new-output");
+        assert_eq!(updated.status, ProjectStatus::Error);
+        assert_eq!(updated.completed_files, completed_files);
+        assert_eq!(state.queue[1].output_path, "/new-output");
+        assert_eq!(state.queue[1].completed_files, completed_files);
+
+        let retried = prepare_project_retry(&mut state, "failed-project").unwrap();
+        assert_eq!(retried.output_path, "/new-output");
+        assert_eq!(retried.first_unfinished_file_index(), Some(1));
     }
 
     #[test]
