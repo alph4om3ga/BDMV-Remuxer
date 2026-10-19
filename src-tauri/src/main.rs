@@ -306,6 +306,29 @@ async fn remove_project(project_id: String, state: State<'_, AppStateType>) -> R
 }
 
 #[tauri::command]
+async fn retry_project(
+    project_id: String,
+    state: State<'_, AppStateType>,
+) -> Result<Project, String> {
+    let mut app_state = state.lock();
+    let project = app_state
+        .queue
+        .iter_mut()
+        .find(|project| project.id == project_id)
+        .ok_or_else(|| "Project was not found in the queue".to_string())?;
+
+    if project.status != ProjectStatus::Error {
+        return Err("Only projects with an error can be retried".into());
+    }
+
+    project.prepare_retry();
+    let retried_project = project.clone();
+
+    app_state.persist_workspace()?;
+    Ok(retried_project)
+}
+
+#[tauri::command]
 async fn get_queue(state: State<'_, AppStateType>) -> Result<Vec<Project>, String> {
     let app_state = state.lock();
     app_state.ensure_workspace_available()?;
@@ -492,6 +515,7 @@ async fn run_mux_queue(window: Window, state: AppStateType, muxer_state: Arc<Mut
                         progress: project.progress_for_completed_files(),
                         current_file: None,
                         status: "processing".into(),
+                        error: None,
                     },
                 );
 
@@ -579,6 +603,7 @@ async fn run_mux_queue(window: Window, state: AppStateType, muxer_state: Arc<Mut
                             progress: (processed_files as f64 / total_files as f64) * 100.0,
                             current_file: Some(file.filename.clone()),
                             status: "processing".into(),
+                            error: None,
                         },
                     );
 
@@ -618,6 +643,7 @@ async fn run_mux_queue(window: Window, state: AppStateType, muxer_state: Arc<Mut
                                     },
                                     current_file: None,
                                     status: "processing".into(),
+                                    error: None,
                                 },
                             );
                         }
@@ -629,11 +655,20 @@ async fn run_mux_queue(window: Window, state: AppStateType, muxer_state: Arc<Mut
                     }
                 }
 
+                let error_message = if failed_files.is_empty() && processed_files == total_files {
+                    None
+                } else {
+                    Some(format!(
+                        "Some source files could not be processed: {}",
+                        failed_files.join("; ")
+                    ))
+                };
+
                 // Mark the project complete only when all its source files succeeded.
                 {
                     let mut app_state = state.lock();
                     if let Some(p) = app_state.queue.iter_mut().find(|p| p.id == project.id) {
-                        if failed_files.is_empty() && processed_files == total_files {
+                        if error_message.is_none() {
                             p.status = ProjectStatus::Complete;
                             p.progress = 100.0;
                             p.current_file = None;
@@ -645,28 +680,25 @@ async fn run_mux_queue(window: Window, state: AppStateType, muxer_state: Arc<Mut
                             } else {
                                 (processed_files as f64 / total_files as f64) * 100.0
                             };
-                            p.error = Some(format!(
-                                "Some source files could not be processed: {}",
-                                failed_files.join("; ")
-                            ));
+                            p.current_file = None;
+                            p.error = error_message.clone();
                         }
                     }
                     persist_from_mux(&window, &app_state);
                 }
 
-                let (final_status, final_progress) =
-                    if failed_files.is_empty() && processed_files == total_files {
-                        ("complete", 100.0)
-                    } else {
-                        (
-                            "error",
-                            if total_files == 0 {
-                                0.0
-                            } else {
-                                (processed_files as f64 / total_files as f64) * 100.0
-                            },
-                        )
-                    };
+                let (final_status, final_progress) = if error_message.is_none() {
+                    ("complete", 100.0)
+                } else {
+                    (
+                        "error",
+                        if total_files == 0 {
+                            0.0
+                        } else {
+                            (processed_files as f64 / total_files as f64) * 100.0
+                        },
+                    )
+                };
                 let _ = window.emit(
                     "mux-progress",
                     MuxProgress {
@@ -674,6 +706,7 @@ async fn run_mux_queue(window: Window, state: AppStateType, muxer_state: Arc<Mut
                         progress: final_progress,
                         current_file: None,
                         status: final_status.into(),
+                        error: error_message,
                     },
                 );
             }
@@ -894,6 +927,7 @@ fn main() {
             // Project & Queue
             create_project,
             remove_project,
+            retry_project,
             get_queue,
             get_current_volumes,
             clear_volumes,

@@ -412,6 +412,13 @@ impl Project {
             (self.completed_file_count() as f64 / total_files as f64) * 100.0
         }
     }
+
+    pub fn prepare_retry(&mut self) {
+        self.status = ProjectStatus::Pending;
+        self.progress = self.progress_for_completed_files();
+        self.current_file = None;
+        self.error = None;
+    }
 }
 
 // ============================================================================
@@ -988,6 +995,21 @@ mod tests {
         assert!((project.progress_for_completed_files() - 100.0 / 3.0).abs() < 0.001);
         assert!(project.is_file_completed("/disc/BDMV/STREAM/00001.m2ts"));
         assert!(!project.is_file_completed("/disc/BDMV/STREAM/00002.m2ts"));
+
+        project.status = ProjectStatus::Error;
+        project.progress = 100.0;
+        project.current_file = Some("00002.m2ts".into());
+        project.error = Some("mux failed".into());
+        project.prepare_retry();
+
+        assert_eq!(project.status, ProjectStatus::Pending);
+        assert_eq!(project.current_file, None);
+        assert_eq!(project.error, None);
+        assert_eq!(
+            project.completed_files,
+            vec!["/disc/BDMV/STREAM/00001.m2ts"]
+        );
+        assert!((project.progress - 100.0 / 3.0).abs() < 0.001);
 
         project.completed_files.extend([
             "/disc/BDMV/STREAM/00002.m2ts".into(),

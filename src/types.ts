@@ -51,8 +51,9 @@ export interface Project {
   status: ProjectStatus;
   progress: number;
   current_file?: string;
+  completed_files: string[];
   created_at: string;
-  error?: string;
+  error?: string | null;
 }
 
 // ============================================================================

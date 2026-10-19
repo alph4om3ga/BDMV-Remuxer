@@ -21,6 +21,7 @@ interface MuxProgress {
   progress: number;
   current_file?: string;
   status: string;
+  error?: string | null;
 }
 
 interface AppStore {
@@ -49,6 +50,7 @@ interface AppStore {
   updateTrack: (volumeId: string, fileId: string, trackId: number, language: string, name: string) => Promise<void>;
   createProject: () => Promise<void>;
   removeProject: (projectId: string) => Promise<void>;
+  retryProject: (projectId: string) => Promise<void>;
   startMuxing: () => Promise<void>;
   pauseMuxing: () => Promise<void>;
   resumeMuxing: () => Promise<void>;
@@ -214,6 +216,22 @@ export const useAppStore = create<AppStore>((set, get) => ({
     }
   },
 
+  retryProject: async (projectId) => {
+    try {
+      const project = await invoke<Project>('retry_project', { projectId });
+      set(state => ({
+        error: null,
+        queue: state.queue.map(item => item.id === project.id ? project : item),
+      }));
+
+      if (!get().muxerStatus.is_running) {
+        await get().startMuxing();
+      }
+    } catch (e) {
+      set({ error: String(e) });
+    }
+  },
+
   startMuxing: async () => {
     try {
       await invoke('start_muxing');
@@ -348,6 +366,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
             status: payload.status as Project['status'],
             progress: payload.progress,
             current_file: payload.current_file,
+            error: payload.error || undefined,
           }
         ),
       }));

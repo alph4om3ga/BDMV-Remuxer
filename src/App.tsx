@@ -4,7 +4,7 @@ import {
   FolderOpen, Play, Pause, Settings, ChevronRight, ChevronDown, 
   Film, Tv, Music, Star, AlertTriangle, Check, X, Edit3, 
   Clock, HardDrive, Layers, Plus, Trash2, Square,
-  FileVideo, List, Save, FolderInput, Grip
+  FileVideo, List, Save, FolderInput, Grip, RotateCw
 } from 'lucide-react';
 import { formatDuration, formatSize, getCategoryColor, getFileNumber, formatFileLabel } from './utils/format';
 import type { MediaFile, Track, Volume, Project, Settings as SettingsType, FileCategory } from './types';
@@ -158,9 +158,10 @@ interface QueueItemProps {
   project: Project;
   isActive: boolean;
   onRemove: () => void;
+  onRetry: () => void;
 }
 
-const QueueItem: React.FC<QueueItemProps> = ({ project, isActive, onRemove }) => {
+const QueueItem: React.FC<QueueItemProps> = ({ project, isActive, onRemove, onRetry }) => {
   const statusColors: Record<string, string> = {
     pending: '#94a3b8',
     processing: '#4ade80',
@@ -191,7 +192,15 @@ const QueueItem: React.FC<QueueItemProps> = ({ project, isActive, onRemove }) =>
         {project.current_file && project.status === 'processing' && (
           <div className="queue-current-file">{project.current_file}</div>
         )}
+        {project.error && (
+          <div className="queue-error-detail" title={project.error}>{project.error}</div>
+        )}
       </div>
+      {project.status === 'error' && (
+        <button className="queue-retry" onClick={onRetry} title="Retry unfinished files">
+          <RotateCw size={14} /> Retry
+        </button>
+      )}
       <button className="queue-remove" onClick={onRemove}>
         <X size={14} />
       </button>
@@ -598,6 +607,7 @@ const App: React.FC = () => {
     toggleVolumeExpanded,
     createProject,
     removeProject,
+    retryProject,
     startMuxing,
     pauseMuxing,
     resumeMuxing,
@@ -711,6 +721,7 @@ const App: React.FC = () => {
                   project={project}
                   isActive={project.status === 'processing'}
                   onRemove={() => removeProject(project.id)}
+                  onRetry={() => retryProject(project.id)}
                 />
               ))
             )}
