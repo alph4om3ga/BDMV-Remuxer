@@ -38,6 +38,7 @@ pub struct MuxProgress {
     pub project_id: String,
     pub progress: f64,
     pub current_file: Option<String>,
+    pub resume_reason: Option<String>,
     pub status: String,
     pub error: Option<String>,
 }

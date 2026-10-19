@@ -321,6 +321,12 @@ input:focus, select:focus {
   margin-top: 2px;
 }
 
+.queue-resume-reason {
+  font-size: 11px;
+  color: var(--text-secondary);
+  margin-top: 3px;
+}
+
 .queue-remove {
   background: none;
   color: var(--text-muted);

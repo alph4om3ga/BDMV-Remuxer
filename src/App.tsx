@@ -220,6 +220,9 @@ const QueueItem: React.FC<QueueItemProps> = ({
         {project.current_file && project.status === 'processing' && (
           <div className="queue-current-file">{project.current_file}</div>
         )}
+        {project.current_file && project.resume_reason && project.status === 'processing' && (
+          <div className="queue-resume-reason">{project.resume_reason}</div>
+        )}
         {project.error && (
           <div className="queue-error-detail" title={project.error}>{project.error}</div>
         )}

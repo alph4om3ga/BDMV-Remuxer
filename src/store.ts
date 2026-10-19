@@ -28,6 +28,7 @@ interface MuxProgress {
   project_id: string;
   progress: number;
   current_file?: string;
+  resume_reason?: string | null;
   status: string;
   error?: string | null;
 }
@@ -476,6 +477,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
             status: payload.status as Project['status'],
             progress: payload.progress,
             current_file: payload.current_file,
+            resume_reason: payload.resume_reason ?? null,
             error: payload.error || undefined,
           }
         ),

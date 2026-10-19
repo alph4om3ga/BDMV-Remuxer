@@ -9,8 +9,8 @@ mod tool_error;
 use crate::bdmv::{BdmvParser, MediaFile, Track, Volume};
 use crate::muxer::{MuxJob, MuxProgress, Muxer};
 use crate::state::{
-    settings_directory_for_config_root, source_file_fingerprint, AppState, Project, ProjectStatus,
-    Settings, SettingsRecoveryPreview,
+    settings_directory_for_config_root, source_file_fingerprint, AppState, CompletedFile, Project,
+    ProjectStatus, Settings, SettingsRecoveryPreview,
 };
 use parking_lot::Mutex;
 use serde::Serialize;
@@ -578,6 +578,81 @@ where
     Ok(source_fingerprint)
 }
 
+fn completion_resume_notices(
+    completed_files: &[CompletedFile],
+    current_fingerprints: &HashMap<String, String>,
+) -> HashMap<String, String> {
+    completed_files
+        .iter()
+        .filter_map(|completed| {
+            let notice = match completed.fingerprint.as_ref() {
+                None => {
+                    "This saved completion is from an older version and has no source fingerprint; remuxing again."
+                }
+                Some(saved_fingerprint)
+                    if current_fingerprints
+                        .get(&completed.path)
+                        .is_some_and(|current| current != saved_fingerprint) =>
+                {
+                    "Source contents changed since the last remux; remuxing again."
+                }
+                Some(_) => return None,
+            };
+            Some((completed.path.clone(), notice.to_string()))
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod completion_resume_notice_tests {
+    use super::completion_resume_notices;
+    use crate::state::CompletedFile;
+    use std::collections::HashMap;
+
+    #[test]
+    fn notices_only_changed_and_legacy_completion_markers() {
+        let completed_files = vec![
+            CompletedFile {
+                path: "/source/changed.m2ts".into(),
+                fingerprint: Some("old-fingerprint".into()),
+            },
+            CompletedFile {
+                path: "/source/legacy.m2ts".into(),
+                fingerprint: None,
+            },
+            CompletedFile {
+                path: "/source/unchanged.m2ts".into(),
+                fingerprint: Some("same-fingerprint".into()),
+            },
+            CompletedFile {
+                path: "/source/unavailable.m2ts".into(),
+                fingerprint: Some("saved-fingerprint".into()),
+            },
+        ];
+        let current_fingerprints = HashMap::from([
+            ("/source/changed.m2ts".into(), "new-fingerprint".into()),
+            ("/source/legacy.m2ts".into(), "current-fingerprint".into()),
+            ("/source/unchanged.m2ts".into(), "same-fingerprint".into()),
+        ]);
+
+        let notices = completion_resume_notices(&completed_files, &current_fingerprints);
+
+        assert_eq!(notices.len(), 2);
+        assert_eq!(
+            notices.get("/source/changed.m2ts").map(String::as_str),
+            Some("Source contents changed since the last remux; remuxing again.")
+        );
+        assert_eq!(
+            notices.get("/source/legacy.m2ts").map(String::as_str),
+            Some(
+                "This saved completion is from an older version and has no source fingerprint; remuxing again."
+            )
+        );
+        assert!(!notices.contains_key("/source/unchanged.m2ts"));
+        assert!(!notices.contains_key("/source/unavailable.m2ts"));
+    }
+}
+
 async fn run_mux_queue(window: Window, state: AppStateType, muxer_state: Arc<Mutex<Muxer>>) {
     loop {
         // Check if we should stop or wait (drop guard before any await).
@@ -624,6 +699,8 @@ async fn run_mux_queue(window: Window, state: AppStateType, muxer_state: Arc<Mut
                 })
                 .await
                 .unwrap_or_default();
+                let resume_notices =
+                    completion_resume_notices(&project.completed_files, &current_fingerprints);
                 project.retain_completed_files_matching(&current_fingerprints);
 
                 // Update status to processing
@@ -644,6 +721,7 @@ async fn run_mux_queue(window: Window, state: AppStateType, muxer_state: Arc<Mut
                         project_id: project.id.clone(),
                         progress: project.progress_for_completed_files(),
                         current_file: None,
+                        resume_reason: None,
                         status: "processing".into(),
                         error: None,
                     },
@@ -739,6 +817,7 @@ async fn run_mux_queue(window: Window, state: AppStateType, muxer_state: Arc<Mut
                             project_id: project.id.clone(),
                             progress: (processed_files as f64 / total_files as f64) * 100.0,
                             current_file: Some(file.filename.clone()),
+                            resume_reason: resume_notices.get(&file.path).cloned(),
                             status: "processing".into(),
                             error: None,
                         },
@@ -782,6 +861,7 @@ async fn run_mux_queue(window: Window, state: AppStateType, muxer_state: Arc<Mut
                                         (processed_files as f64 / total_files as f64) * 100.0
                                     },
                                     current_file: None,
+                                    resume_reason: None,
                                     status: "processing".into(),
                                     error: None,
                                 },
@@ -819,6 +899,7 @@ async fn run_mux_queue(window: Window, state: AppStateType, muxer_state: Arc<Mut
                             project_id: project.id.clone(),
                             progress,
                             current_file: None,
+                            resume_reason: None,
                             status: "paused".into(),
                             error: None,
                         },
@@ -876,6 +957,7 @@ async fn run_mux_queue(window: Window, state: AppStateType, muxer_state: Arc<Mut
                         project_id: project.id.clone(),
                         progress: final_progress,
                         current_file: None,
+                        resume_reason: None,
                         status: final_status.into(),
                         error: error_message,
                     },
