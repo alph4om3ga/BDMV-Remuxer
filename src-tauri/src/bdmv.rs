@@ -62,6 +62,14 @@ pub struct Volume {
     pub name: String,
     pub volume_number: usize,
     pub files: Vec<MediaFile>,
+    #[serde(default)]
+    pub probe_failures: Vec<ProbeFailure>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProbeFailure {
+    pub path: String,
+    pub diagnostic: String,
 }
 
 // ============================================================================
@@ -164,11 +172,19 @@ impl BdmvParser {
 
         // Parse each file with ffprobe
         let mut files: Vec<MediaFile> = Vec::new();
+        let mut probe_failures = Vec::new();
         for file_path in &m2ts_files {
             match self.probe_file(file_path.to_string_lossy().as_ref()).await {
                 Ok(media_file) => files.push(media_file),
                 Err(error @ BdmvError::ToolLaunch(_)) => return Err(error),
-                Err(e) => eprintln!("Warning: could not probe {:?}: {}", file_path, e),
+                Err(error) => {
+                    let diagnostic = error.to_string();
+                    eprintln!("Warning: could not probe {:?}: {}", file_path, diagnostic);
+                    probe_failures.push(ProbeFailure {
+                        path: file_path.to_string_lossy().to_string(),
+                        diagnostic,
+                    });
+                }
             }
         }
 
@@ -195,6 +211,7 @@ impl BdmvParser {
             name: volume_name,
             volume_number: 1,
             files,
+            probe_failures,
         })
     }
 
@@ -204,8 +221,10 @@ impl BdmvParser {
 
         let output = Command::new(&self.ffprobe_path)
             .args([
-                "-v", "quiet",
-                "-print_format", "json",
+                "-v",
+                "error",
+                "-print_format",
+                "json",
                 "-show_streams",
                 "-show_format",
                 path,
@@ -224,7 +243,12 @@ impl BdmvParser {
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(BdmvError::Ffprobe(stderr.to_string()));
+            let diagnostic = if stderr.trim().is_empty() {
+                format!("ffprobe exited with status {}", output.status)
+            } else {
+                stderr.trim().to_string()
+            };
+            return Err(BdmvError::Ffprobe(diagnostic));
         }
 
         let json_str = String::from_utf8_lossy(&output.stdout);
@@ -432,5 +456,53 @@ mod tests {
         assert!(message.contains("ffprobe"), "{message}");
         assert!(message.contains("FFprobe Path"), "{message}");
         assert!(message.contains("Settings"), "{message}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn parsing_keeps_good_files_and_reports_each_failed_probe() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root =
+            std::env::temp_dir().join(format!("bdmv-remuxer-partial-probe-{}", std::process::id()));
+        let stream = root.join("BDMV").join("STREAM");
+        fs::create_dir_all(&stream).unwrap();
+        fs::write(stream.join("00000-bad.m2ts"), b"bad").unwrap();
+        fs::write(stream.join("00001-good.m2ts"), b"good").unwrap();
+
+        let ffprobe = root.join("fake-ffprobe");
+        fs::write(
+            &ffprobe,
+            r#"#!/bin/sh
+for arg in "$@"; do input="$arg"; done
+case "$input" in
+  *bad.m2ts) echo "Invalid data found when processing input" >&2; exit 1 ;;
+  *) echo '{"streams":[],"format":{"duration":"1800","size":"4"}}' ;;
+esac
+"#,
+        )
+        .unwrap();
+        let mut permissions = fs::metadata(&ffprobe).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&ffprobe, permissions).unwrap();
+
+        let result = BdmvParser::with_ffprobe(ffprobe.to_string_lossy().to_string())
+            .parse_volume(root.to_string_lossy().as_ref())
+            .await
+            .unwrap();
+
+        assert_eq!(result.files.len(), 1);
+        assert!(result.files[0].filename.contains("good"));
+        assert_eq!(result.probe_failures.len(), 1);
+        assert!(result.probe_failures[0].path.ends_with("00000-bad.m2ts"));
+        assert!(
+            result.probe_failures[0]
+                .diagnostic
+                .contains("Invalid data found when processing input"),
+            "{}",
+            result.probe_failures[0].diagnostic
+        );
+
+        let _ = fs::remove_dir_all(&root);
     }
 }

@@ -34,6 +34,12 @@ export interface Volume {
   name: string;
   volume_number: number;
   files: MediaFile[];
+  probe_failures: ProbeFailure[];
+}
+
+export interface ProbeFailure {
+  path: string;
+  diagnostic: string;
 }
 
 // ============================================================================

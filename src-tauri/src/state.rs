@@ -617,7 +617,7 @@ mod tests {
         write_settings_atomically_with, AppState, CompletedFile, Project, ProjectStatus, Settings,
         WorkspaceData,
     };
-    use crate::bdmv::{Track, Volume};
+    use crate::bdmv::{ProbeFailure, Track, Volume};
     use chrono::Utc;
     use std::collections::HashMap;
     use std::path::PathBuf;
@@ -924,6 +924,10 @@ mod tests {
                 test_media_file("00001.m2ts"),
                 test_media_file("00002.m2ts"),
             ],
+            probe_failures: vec![ProbeFailure {
+                path: "/disc/BDMV/STREAM/bad.m2ts".into(),
+                diagnostic: "Invalid data found when processing input".into(),
+            }],
         };
         let track = Track {
             id: 2,
@@ -966,6 +970,11 @@ mod tests {
         restored.restore_workspace(&config_dir).unwrap();
 
         assert_eq!(restored.current_volumes[0].name, "Disc 1");
+        assert_eq!(restored.current_volumes[0].probe_failures.len(), 1);
+        assert_eq!(
+            restored.current_volumes[0].probe_failures[0].diagnostic,
+            "Invalid data found when processing input"
+        );
         assert_eq!(
             restored.track_templates["EPISODE"][0].name,
             "Edited track name"
@@ -1056,6 +1065,7 @@ mod tests {
                     make_file("00002.m2ts"),
                     make_file("00003.m2ts"),
                 ],
+                probe_failures: Vec::new(),
             }],
             track_templates: HashMap::new(),
             status: ProjectStatus::Paused,
@@ -1126,6 +1136,7 @@ mod tests {
                 name: "Disc 1".into(),
                 volume_number: 1,
                 files: vec![file],
+                probe_failures: Vec::new(),
             }],
             track_templates: HashMap::new(),
             status: ProjectStatus::Paused,
@@ -1171,6 +1182,7 @@ mod tests {
                 name: "Disc 1".into(),
                 volume_number: 1,
                 files: vec![file],
+                probe_failures: Vec::new(),
             }],
             track_templates: HashMap::new(),
             status: ProjectStatus::Paused,

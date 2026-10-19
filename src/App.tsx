@@ -135,6 +135,22 @@ const VolumeCard: React.FC<VolumeCardProps> = ({
       
       {isExpanded && (
         <div className="volume-files">
+          {volume.probe_failures?.length > 0 && (
+            <section className="probe-failures" aria-label="FFprobe failures">
+              <h4>
+                <AlertTriangle size={16} />
+                {volume.probe_failures.length} source {volume.probe_failures.length === 1 ? 'file was' : 'files were'} skipped
+              </h4>
+              <ul>
+                {volume.probe_failures.map((failure, index) => (
+                  <li key={`${failure.path}-${index}`}>
+                    <strong>{failure.path}</strong>
+                    <pre>{failure.diagnostic}</pre>
+                  </li>
+                ))}
+              </ul>
+            </section>
+          )}
           {volume.files.map(file => (
             <FileItem 
               key={file.id}
