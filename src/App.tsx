@@ -336,7 +336,7 @@ const SettingsModal: React.FC<SettingsModalProps> = ({ settings: initialSettings
             <div className="setting-row">
               <div className="setting-label">
                 MKVToolNix Path
-                <small>Path to mkvmerge executable</small>
+                <small>mkvmerge executable name or full path</small>
               </div>
               <div className="setting-input">
                 <input 
@@ -351,7 +351,7 @@ const SettingsModal: React.FC<SettingsModalProps> = ({ settings: initialSettings
             <div className="setting-row">
               <div className="setting-label">
                 FFprobe Path
-                <small>Path to ffprobe executable</small>
+                <small>ffprobe executable name or full path</small>
               </div>
               <div className="setting-input">
                 <input 

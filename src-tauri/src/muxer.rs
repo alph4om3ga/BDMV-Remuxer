@@ -1,4 +1,5 @@
 use crate::bdmv::Track;
+use crate::tool_error::format_tool_launch_error;
 use serde::{Deserialize, Serialize};
 use std::process::Stdio;
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -119,7 +120,15 @@ impl Muxer {
 
         cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
 
-        let mut child = cmd.spawn().map_err(|e| format!("Failed to spawn mkvmerge: {}", e))?;
+        let mut child = cmd.spawn().map_err(|e| {
+            format_tool_launch_error(
+                "mkvmerge",
+                mkvmerge_path,
+                "MKVToolNix Path",
+                "MKVToolNix",
+                e,
+            )
+        })?;
 
         if let Some(stdout) = child.stdout.take() {
             let mut reader = BufReader::new(stdout).lines();
@@ -140,5 +149,36 @@ impl Muxer {
         } else {
             Err(format!("mkvmerge exited with code {:?}", status.code()))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{MuxJob, Muxer};
+    use crate::bdmv::Track;
+    use std::path::PathBuf;
+
+    #[tokio::test]
+    async fn missing_mkvmerge_path_returns_actionable_error() {
+        let tool_path: PathBuf = std::env::temp_dir().join(format!(
+            "bdmv-remuxer-test-missing-mkvmerge-{}.exe",
+            std::process::id()
+        ));
+        assert!(!tool_path.exists());
+        let path = tool_path.to_string_lossy().to_string();
+        let job = MuxJob {
+            input_path: "input.m2ts".into(),
+            output_path: "output.mkv".into(),
+            chapter_path: None,
+            tracks: Vec::<Track>::new(),
+        };
+
+        let error = Muxer::run_mkvmerge(&path, &job).await.unwrap_err();
+
+        assert!(error.contains("mkvmerge"), "{error}");
+        assert!(error.contains("MKVToolNix Path"), "{error}");
+        assert!(error.contains("Settings"), "{error}");
+        assert!(error.contains("MKVToolNix"), "{error}");
+        assert!(error.contains(&path), "{error}");
     }
 }

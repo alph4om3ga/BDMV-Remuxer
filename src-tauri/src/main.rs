@@ -4,6 +4,7 @@
 mod bdmv;
 mod muxer;
 mod state;
+mod tool_error;
 
 use crate::bdmv::{BdmvParser, MediaFile, Track, Volume};
 use crate::muxer::{MuxJob, MuxProgress, Muxer};
@@ -28,7 +29,8 @@ type AppStateType = Arc<Mutex<AppState>>;
 
 #[tauri::command]
 async fn load_bdmv(path: String, state: State<'_, AppStateType>) -> Result<Volume, String> {
-    let parser = BdmvParser::new();
+    let ffprobe_path = state.lock().settings.ffprobe_path.clone();
+    let parser = BdmvParser::with_ffprobe(ffprobe_path);
     let volume = parser
         .parse_volume(&path)
         .await
@@ -49,7 +51,8 @@ async fn load_multiple_bdmvs(
     paths: Vec<String>,
     state: State<'_, AppStateType>,
 ) -> Result<Vec<Volume>, String> {
-    let parser = BdmvParser::new();
+    let ffprobe_path = state.lock().settings.ffprobe_path.clone();
+    let parser = BdmvParser::with_ffprobe(ffprobe_path);
     let mut volumes = Vec::new();
 
     for (index, path) in paths.iter().enumerate() {
@@ -620,6 +623,7 @@ async fn run_mux_queue(window: Window, state: AppStateType, muxer_state: Arc<Mut
                         }
                         Err(e) => {
                             eprintln!("Muxing failed for {}: {}", file.filename, e);
+                            let _ = window.emit("app-error", format!("{}: {}", file.filename, e));
                             failed_files.push(format!("{}: {}", file.filename, e));
                         }
                     }
@@ -778,7 +782,15 @@ async fn verify_mkvmerge(path: String) -> Result<String, String> {
         .arg("--version")
         .output()
         .await
-        .map_err(|e| format!("Failed to run mkvmerge: {}", e))?;
+        .map_err(|e| {
+            tool_error::format_tool_launch_error(
+                "mkvmerge",
+                &path,
+                "MKVToolNix Path",
+                "MKVToolNix",
+                e,
+            )
+        })?;
 
     if output.status.success() {
         let version = String::from_utf8_lossy(&output.stdout);
@@ -793,8 +805,9 @@ async fn verify_mkvmerge(path: String) -> Result<String, String> {
 }
 
 #[tauri::command]
-async fn get_media_info(path: String) -> Result<MediaFile, String> {
-    let parser = BdmvParser::new();
+async fn get_media_info(path: String, state: State<'_, AppStateType>) -> Result<MediaFile, String> {
+    let ffprobe_path = state.lock().settings.ffprobe_path.clone();
+    let parser = BdmvParser::with_ffprobe(ffprobe_path);
     parser
         .get_media_info(&path)
         .await

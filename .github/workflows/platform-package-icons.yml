@@ -43,6 +43,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - run: npm ci
       - run: node scripts/verify-platform-icons.mjs
+      - name: Test media-tool launch errors on Windows
+        run: cargo test --manifest-path src-tauri/Cargo.toml --no-default-features
       - name: Build Windows installer
         run: npm run tauri -- build --bundles msi --ci
       - name: Verify installer and executable icon
@@ -125,6 +127,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - run: npm ci
       - run: node scripts/verify-platform-icons.mjs
+      - name: Test media-tool launch errors on macOS
+        run: cargo test --manifest-path src-tauri/Cargo.toml --no-default-features
       - name: Build macOS app and disk image
         run: npm run tauri -- build --bundles app,dmg --ci
       - name: Verify packaged app icon metadata

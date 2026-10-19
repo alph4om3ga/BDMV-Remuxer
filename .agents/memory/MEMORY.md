@@ -1,0 +1,1 @@
+- [Rust test linker on Replit](rust-test-linker.md) — If tests fail at link time with `cannot find -lz`, expose Nix zlib through linker library paths.

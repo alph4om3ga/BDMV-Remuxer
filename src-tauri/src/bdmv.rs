@@ -1,3 +1,4 @@
+use crate::tool_error::format_tool_launch_error;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use thiserror::Error;
@@ -14,6 +15,8 @@ pub enum BdmvError {
     Io(#[from] std::io::Error),
     #[error("FFprobe error: {0}")]
     Ffprobe(String),
+    #[error("{0}")]
+    ToolLaunch(String),
     #[error("Parse error: {0}")]
     Parse(String),
     #[error("No BDMV/STREAM directory found in: {0}")]
@@ -164,6 +167,7 @@ impl BdmvParser {
         for file_path in &m2ts_files {
             match self.probe_file(file_path.to_string_lossy().as_ref()).await {
                 Ok(media_file) => files.push(media_file),
+                Err(error @ BdmvError::ToolLaunch(_)) => return Err(error),
                 Err(e) => eprintln!("Warning: could not probe {:?}: {}", file_path, e),
             }
         }
@@ -208,7 +212,15 @@ impl BdmvParser {
             ])
             .output()
             .await
-            .map_err(|e| BdmvError::Ffprobe(format!("Failed to run ffprobe: {}", e)))?;
+            .map_err(|e| {
+                BdmvError::ToolLaunch(format_tool_launch_error(
+                    "ffprobe",
+                    &self.ffprobe_path,
+                    "FFprobe Path",
+                    "FFmpeg",
+                    e,
+                ))
+            })?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -362,5 +374,63 @@ impl BdmvParser {
                 _         => {}
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{BdmvError, BdmvParser};
+    use std::fs;
+    use std::path::PathBuf;
+
+    fn missing_tool_path(tool: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "bdmv-remuxer-test-missing-{tool}-{}.exe",
+            std::process::id()
+        ))
+    }
+
+    #[tokio::test]
+    async fn missing_ffprobe_path_returns_actionable_error() {
+        let tool_path = missing_tool_path("ffprobe");
+        assert!(!tool_path.exists());
+
+        let error = BdmvParser::with_ffprobe(tool_path.to_string_lossy().to_string())
+            .get_media_info("sample.m2ts")
+            .await
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("ffprobe"), "{error}");
+        assert!(error.contains("FFprobe Path"), "{error}");
+        assert!(error.contains("Settings"), "{error}");
+        assert!(error.contains("FFmpeg"), "{error}");
+        assert!(
+            error.contains(&tool_path.to_string_lossy().to_string()),
+            "{error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn parsing_a_volume_does_not_hide_a_missing_ffprobe_error() {
+        let root =
+            std::env::temp_dir().join(format!("bdmv-remuxer-test-volume-{}", std::process::id()));
+        let stream = root.join("BDMV").join("STREAM");
+        fs::create_dir_all(&stream).unwrap();
+        fs::write(stream.join("00000.m2ts"), b"").unwrap();
+
+        let tool_path = missing_tool_path("ffprobe");
+        assert!(!tool_path.exists());
+        let result = BdmvParser::with_ffprobe(tool_path.to_string_lossy().to_string())
+            .parse_volume(root.to_string_lossy().as_ref())
+            .await;
+
+        let _ = fs::remove_dir_all(&root);
+        let error = result.unwrap_err();
+        assert!(matches!(&error, BdmvError::ToolLaunch(_)));
+        let message = error.to_string();
+        assert!(message.contains("ffprobe"), "{message}");
+        assert!(message.contains("FFprobe Path"), "{message}");
+        assert!(message.contains("Settings"), "{message}");
     }
 }

@@ -203,10 +203,12 @@ Settings are stored in:
 ## Troubleshooting
 
 ### "mkvmerge not found"
-Ensure MKVToolNix is installed and the path is correct in Settings.
+Install MKVToolNix, then open **Settings → MKVToolNix Path**. Enter `mkvmerge` if it is available on your `PATH`, or the full path to the executable (for example, `mkvmerge.exe` on Windows).
 
 ### "FFprobe error"
-Install FFmpeg and ensure `ffprobe` is in your PATH or set the path in Settings.
+Install FFmpeg, then open **Settings → FFprobe Path**. Enter `ffprobe` if it is available on your `PATH`, or the full path to the executable (for example, `ffprobe.exe` on Windows). On macOS with Homebrew, common locations are `/opt/homebrew/bin/ffprobe` (Apple silicon) and `/usr/local/bin/ffprobe` (Intel).
+
+If the app reports that it could not start either tool, check that the configured path points to the executable itself and that the tool is installed. The error identifies the tool and the Settings field to update.
 
 ### Files not being detected
 Check that:
