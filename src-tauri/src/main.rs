@@ -422,14 +422,7 @@ async fn confirm_close(
         // start another file between the save and the shutdown request.
         let mut muxer = muxer_state.lock();
         let mut app_state = state.lock();
-        app_state.pause_incomplete_projects()?;
-        if muxer.is_running {
-            muxer.is_paused = false;
-            muxer.shutdown_requested = true;
-            true
-        } else {
-            false
-        }
+        prepare_close(&mut app_state, &mut muxer)?
     };
 
     while wait_for_muxer && muxer_state.lock().is_running {
@@ -440,6 +433,17 @@ async fn confirm_close(
     window
         .close()
         .map_err(|error| format!("Failed to close window: {}", error))
+}
+
+fn prepare_close(app_state: &mut AppState, muxer: &mut Muxer) -> Result<bool, String> {
+    app_state.pause_incomplete_projects()?;
+    if muxer.is_running {
+        muxer.is_paused = false;
+        muxer.shutdown_requested = true;
+        Ok(true)
+    } else {
+        Ok(false)
+    }
 }
 
 #[tauri::command]
@@ -1056,13 +1060,73 @@ fn main() {
 
 #[cfg(test)]
 mod close_tests {
-    use super::should_intercept_close;
+    use super::{prepare_close, should_intercept_close, Project, ProjectStatus};
+    use crate::muxer::Muxer;
+    use crate::state::AppState;
+    use chrono::Utc;
+    use std::collections::HashMap;
+    use std::fs;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use uuid::Uuid;
 
     #[test]
     fn close_is_intercepted_only_while_muxing_without_prior_approval() {
         assert!(!should_intercept_close(false, false));
         assert!(should_intercept_close(true, false));
         assert!(!should_intercept_close(true, true));
+    }
+
+    #[test]
+    fn failed_workspace_save_keeps_muxer_running_and_retry_persists_paused_queue() {
+        let config_dir =
+            std::env::temp_dir().join(format!("bdmv-remuxer-close-test-{}", Uuid::new_v4()));
+        let mut app_state = AppState::default();
+        app_state.restore_workspace(&config_dir).unwrap();
+        app_state.queue.push(Project {
+            id: "queued-project".into(),
+            output_name: "Queued project".into(),
+            output_path: "/output".into(),
+            volumes: Vec::new(),
+            track_templates: HashMap::new(),
+            status: ProjectStatus::Pending,
+            progress: 0.0,
+            current_file: None,
+            completed_files: Vec::new(),
+            created_at: Utc::now(),
+            error: None,
+        });
+
+        fs::remove_dir_all(&config_dir).unwrap();
+        fs::write(&config_dir, b"block workspace directory creation").unwrap();
+
+        let mut muxer = Muxer {
+            is_running: true,
+            is_paused: false,
+            shutdown_requested: false,
+        };
+        let close_approval = AtomicBool::new(false);
+
+        let error = prepare_close(&mut app_state, &mut muxer).unwrap_err();
+
+        assert!(error.contains("Failed to create workspace directory"));
+        assert!(should_intercept_close(
+            muxer.is_running,
+            close_approval.load(Ordering::SeqCst)
+        ));
+        assert!(!muxer.shutdown_requested);
+        assert_eq!(app_state.queue[0].status, ProjectStatus::Paused);
+
+        fs::remove_file(&config_dir).unwrap();
+        fs::create_dir_all(&config_dir).unwrap();
+
+        assert!(prepare_close(&mut app_state, &mut muxer).unwrap());
+        assert!(muxer.shutdown_requested);
+        assert!(!close_approval.load(Ordering::SeqCst));
+        let saved_workspace: serde_json::Value =
+            serde_json::from_slice(&fs::read(config_dir.join("workspace.json")).unwrap()).unwrap();
+        assert_eq!(saved_workspace["queue"][0]["status"], "paused");
+
+        fs::remove_dir_all(config_dir).unwrap();
     }
 }
 

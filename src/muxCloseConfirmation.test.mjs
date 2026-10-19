@@ -28,14 +28,24 @@ test('accepting the close prompt invokes the save-and-close command', async () =
   assert.equal(closeCommandCalls, 1);
 });
 
-test('a failed save-and-close command is reported without treating the close as approved', async () => {
-  let reportedError;
+test('a failed save is reported and a later close attempt can succeed', async () => {
+  let closeCommandCalls = 0;
+  const reportedErrors = [];
 
-  await handleMuxCloseRequested(
+  const requestClose = () => handleMuxCloseRequested(
     async () => true,
-    async () => { throw new Error('workspace save failed'); },
-    (message) => { reportedError = message; },
+    async () => {
+      closeCommandCalls += 1;
+      if (closeCommandCalls === 1) throw new Error('workspace save failed');
+    },
+    (message) => reportedErrors.push(message),
   );
 
-  assert.equal(reportedError, 'Error: workspace save failed');
+  await requestClose();
+  assert.equal(closeCommandCalls, 1);
+  assert.deepEqual(reportedErrors, ['Error: workspace save failed']);
+
+  await requestClose();
+  assert.equal(closeCommandCalls, 2);
+  assert.deepEqual(reportedErrors, ['Error: workspace save failed']);
 });
