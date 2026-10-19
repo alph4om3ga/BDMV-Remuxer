@@ -178,6 +178,14 @@ impl Settings {
     }
 
     pub fn load_with_recovery(config_dir: &Path) -> SettingsLoadOutcome {
+        if let Err(error) = cleanup_stale_settings_temporary_files(config_dir) {
+            eprintln!(
+                "Could not clean up abandoned temporary settings files in {}: {}",
+                config_dir.display(),
+                error
+            );
+        }
+
         let path = config_dir.join(Self::FILE_NAME);
         match fs::read(&path) {
             Ok(contents) => match serde_json::from_slice::<Self>(&contents) {
@@ -404,6 +412,100 @@ fn write_settings_atomically_with(
     }
 
     Ok(())
+}
+
+fn cleanup_stale_settings_temporary_files(config_dir: &Path) -> std::io::Result<()> {
+    let entries = match fs::read_dir(config_dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    let prefix = format!(".{}.tmp-", Settings::FILE_NAME);
+
+    for entry in entries {
+        let entry = entry?;
+        if !entry.file_type()?.is_file() {
+            continue;
+        }
+
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        let Some(pid_and_counter) = name.strip_prefix(&prefix) else {
+            continue;
+        };
+        let Some((pid, counter)) = pid_and_counter.split_once('-') else {
+            continue;
+        };
+        if counter.is_empty() || !counter.bytes().all(|byte| byte.is_ascii_digit()) {
+            continue;
+        }
+        let Ok(pid) = pid.parse::<u32>() else {
+            continue;
+        };
+
+        if !process_is_running(pid) {
+            fs::remove_file(entry.path())?;
+        }
+    }
+
+    Ok(())
+}
+
+#[cfg(unix)]
+fn process_is_running(pid: u32) -> bool {
+    use std::os::raw::c_int;
+
+    if pid == 0 || pid > c_int::MAX as u32 {
+        return false;
+    }
+
+    unsafe extern "C" {
+        fn kill(pid: c_int, signal: c_int) -> c_int;
+    }
+
+    let result = unsafe { kill(pid as c_int, 0) };
+    result == 0 || std::io::Error::last_os_error().raw_os_error() != Some(3)
+}
+
+#[cfg(windows)]
+fn process_is_running(pid: u32) -> bool {
+    use std::ffi::c_void;
+
+    const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
+    const STILL_ACTIVE: u32 = 259;
+    type Handle = *mut c_void;
+
+    #[link(name = "Kernel32")]
+    extern "system" {
+        fn OpenProcess(access: u32, inherit_handle: i32, process_id: u32) -> Handle;
+        fn GetExitCodeProcess(process: Handle, exit_code: *mut u32) -> i32;
+        fn CloseHandle(object: Handle) -> i32;
+        fn GetLastError() -> u32;
+    }
+
+    if pid == 0 {
+        return false;
+    }
+
+    let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+    if process.is_null() {
+        // Only an invalid PID proves the process has exited; preserve on other errors.
+        return unsafe { GetLastError() } != 87;
+    }
+
+    let mut exit_code = 0;
+    let query_succeeded = unsafe { GetExitCodeProcess(process, &mut exit_code) } != 0;
+    unsafe {
+        CloseHandle(process);
+    }
+    !query_succeeded || exit_code == STILL_ACTIVE
+}
+
+#[cfg(not(any(unix, windows)))]
+fn process_is_running(_pid: u32) -> bool {
+    // On unknown platforms, preserve files rather than risk deleting an active write.
+    true
 }
 
 #[cfg(not(windows))]
@@ -843,6 +945,8 @@ mod tests {
     use crate::bdmv::{ProbeFailure, Track, Volume};
     use chrono::Utc;
     use std::collections::HashMap;
+    use std::fs::OpenOptions;
+    use std::io::Write;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -919,6 +1023,74 @@ mod tests {
         );
         assert!(settings.recovery_warning.is_none());
         assert!(settings.can_save);
+    }
+
+    #[test]
+    fn startup_removes_only_stale_settings_temporary_files_and_preserves_settings() {
+        let config_dir = temporary_config_dir();
+        std::fs::create_dir_all(&config_dir).unwrap();
+        let settings_path = config_dir.join("settings.json");
+        let mut settings = Settings::default();
+        settings.mkvmerge_path = "/existing/bin/mkvmerge".into();
+        let original_settings = serde_json::to_vec_pretty(&settings).unwrap();
+        std::fs::write(&settings_path, &original_settings).unwrap();
+
+        let stale_temp = config_dir.join(".settings.json.tmp-4294967295-17");
+        let unrelated_temp = config_dir.join("settings.json.tmp-4294967295-18");
+        let malformed_temp = config_dir.join(".settings.json.tmp-not-a-pid-19");
+        let other_file = config_dir.join(".other.json.tmp-4294967295-20");
+        std::fs::write(&stale_temp, b"abandoned write").unwrap();
+        std::fs::write(&unrelated_temp, b"leave alone").unwrap();
+        std::fs::write(&malformed_temp, b"leave alone").unwrap();
+        std::fs::write(&other_file, b"leave alone").unwrap();
+
+        let loaded = Settings::load_with_recovery(&config_dir);
+
+        assert!(loaded.can_save);
+        assert_eq!(loaded.settings.mkvmerge_path, "/existing/bin/mkvmerge");
+        assert_eq!(std::fs::read(&settings_path).unwrap(), original_settings);
+        assert!(
+            !stale_temp.exists(),
+            "abandoned temporary file should be removed"
+        );
+        assert!(unrelated_temp.exists());
+        assert!(malformed_temp.exists());
+        assert!(other_file.exists());
+
+        std::fs::remove_dir_all(config_dir).unwrap();
+    }
+
+    #[test]
+    fn startup_preserves_temporary_settings_file_owned_by_a_live_process() {
+        let config_dir = temporary_config_dir();
+        std::fs::create_dir_all(&config_dir).unwrap();
+        let settings_path = config_dir.join("settings.json");
+        let original_settings = br#"{"mkvmerge_path":"/existing/bin/mkvmerge"}"#;
+        std::fs::write(&settings_path, original_settings).unwrap();
+
+        let active_temp = config_dir.join(format!(".settings.json.tmp-{}-0", std::process::id()));
+        let mut active_writer = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&active_temp)
+            .unwrap();
+        active_writer.write_all(b"partial active write").unwrap();
+
+        let loaded = Settings::load_with_recovery(&config_dir);
+
+        assert!(loaded.can_save);
+        assert_eq!(
+            std::fs::read(&settings_path).unwrap(),
+            original_settings,
+            "cleanup must not alter the current preferences"
+        );
+        assert!(
+            active_temp.exists(),
+            "a live process's temp file must remain"
+        );
+
+        drop(active_writer);
+        std::fs::remove_dir_all(config_dir).unwrap();
     }
 
     #[test]
