@@ -107,6 +107,14 @@ npm run icons:verify
 
 The generator rasterizes the SVG master and uses the Tauri CLI to refresh the PNG, ICO, and ICNS files referenced by `src-tauri/tauri.conf.json`.
 
+To review how the artwork reads at small and large sizes, run:
+
+```bash
+npm run icons:preview
+```
+
+Open `generated-artifacts/icon-preview.png`. The sheet shows pixel-perfect enlarged previews of the 16px, 32px, 128px, and 256px icon sizes, plus 16px and 32px samples at native size. At the native sizes, check that the play triangle remains distinct and the disc rings and arrow are still readable. The preview is generated from the SVG master and is not a bundled application icon.
+
 ## Usage
 
 ### 1. Load BDMV Volumes

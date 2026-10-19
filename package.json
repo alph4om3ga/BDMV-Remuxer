@@ -9,6 +9,7 @@
     "preview": "vite preview",
     "test:close-flow": "node --test src/muxCloseConfirmation.test.mjs",
     "icons:generate": "node scripts/generate-icons.mjs",
+    "icons:preview": "node scripts/preview-icons.mjs",
     "icons:verify": "node scripts/verify-platform-icons.mjs",
     "tauri": "tauri"
   },
