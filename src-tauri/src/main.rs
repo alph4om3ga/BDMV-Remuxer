@@ -15,7 +15,7 @@ use crate::state::{
 use parking_lot::Mutex;
 use serde::Serialize;
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tauri::{Manager, State, Window};
@@ -874,12 +874,31 @@ async fn open_settings_recovery_backup(
     window: Window,
     state: State<'_, AppStateType>,
 ) -> Result<(), String> {
-    let backup_path = state
+    let backup_path = settings_recovery_backup_path(&state)?;
+
+    open_recovery_backup(&window, &backup_path)
+}
+
+fn settings_recovery_backup_path(state: &AppStateType) -> Result<PathBuf, String> {
+    state
         .lock()
         .settings_recovery_backup_path()
         .map(PathBuf::from)
-        .ok_or_else(|| "There is no recovered preferences backup to open.".to_string())?;
+        .ok_or_else(|| "There is no recovered preferences backup to open.".to_string())
+}
 
+fn open_recovery_backup(window: &Window, backup_path: &Path) -> Result<(), String> {
+    open_recovery_backup_with(backup_path, |path| {
+        let path = path.to_string_lossy();
+        tauri::api::shell::open(&window.shell_scope(), path.as_ref(), None)
+            .map_err(|error| error.to_string())
+    })
+}
+
+fn open_recovery_backup_with(
+    backup_path: &Path,
+    opener: impl FnOnce(&Path) -> Result<(), String>,
+) -> Result<(), String> {
     if !backup_path.is_file() {
         return Err(format!(
             "The recovered preferences backup is no longer available at {}.",
@@ -887,8 +906,7 @@ async fn open_settings_recovery_backup(
         ));
     }
 
-    let path = backup_path.to_string_lossy();
-    tauri::api::shell::open(&window.shell_scope(), path.as_ref(), None).map_err(|error| {
+    opener(backup_path).map_err(|error| {
         format!(
             "Could not open the recovered preferences backup at {}: {}",
             backup_path.display(),
@@ -1044,8 +1062,21 @@ fn main() {
         std::process::exit(if result.is_ok() { 0 } else { 1 });
     }
 
-    let config_dir =
-        settings_config_dir().expect("could not determine the platform config directory");
+    let recovery_smoke = if args.get(1).map(String::as_str) == Some("--smoke-settings-recovery") {
+        if args.len() != 4 {
+            eprintln!(
+                "Usage: bdmv-remuxer --smoke-settings-recovery <config-directory> <report.log>"
+            );
+            std::process::exit(2);
+        }
+        Some((PathBuf::from(&args[2]), PathBuf::from(&args[3])))
+    } else {
+        None
+    };
+    let config_dir = match recovery_smoke.as_ref() {
+        Some((config_dir, _)) => config_dir.clone(),
+        None => settings_config_dir().expect("could not determine the platform config directory"),
+    };
     let settings_outcome = Settings::load_with_recovery(&config_dir);
     if let Some(warning) = &settings_outcome.recovery_warning {
         eprintln!("{}", warning);
@@ -1057,18 +1088,78 @@ fn main() {
         settings_outcome.recovery_backup_path,
         settings_outcome.can_save,
     );
-    if let Err(error) = restored_state.restore_workspace(&config_dir) {
-        eprintln!("{}", error);
-        restored_state.set_persistence_error(error, &config_dir);
+    if recovery_smoke.is_none() {
+        if let Err(error) = restored_state.restore_workspace(&config_dir) {
+            eprintln!("{}", error);
+            restored_state.set_persistence_error(error, &config_dir);
+        }
     }
     let app_state: AppStateType = Arc::new(Mutex::new(restored_state));
     let muxer_state: Arc<Mutex<Muxer>> = Arc::new(Mutex::new(Muxer::default()));
     let close_approval = Arc::new(AtomicBool::new(false));
+    let recovery_smoke_report_path = recovery_smoke.map(|(_, report_path)| report_path);
 
     tauri::Builder::default()
         .manage(app_state)
         .manage(muxer_state)
         .manage(close_approval.clone())
+        .setup(move |app| {
+            if let Some(report_path) = recovery_smoke_report_path {
+                let result = (|| -> Result<String, String> {
+                    let state = app.state::<AppStateType>();
+                    let backup_path = settings_recovery_backup_path(&state)?;
+                    let window = app
+                        .get_window("main")
+                        .ok_or_else(|| "The app's main window is unavailable.".to_string())?;
+                    let original_contents = std::fs::read(&backup_path).map_err(|error| {
+                        format!(
+                            "Could not read the recovered preferences backup at {}: {}",
+                            backup_path.display(),
+                            error
+                        )
+                    })?;
+                    open_recovery_backup(&window, &backup_path)?;
+                    let opened_contents = std::fs::read(&backup_path).map_err(|error| {
+                        format!(
+                            "Could not verify the recovered preferences backup at {}: {}",
+                            backup_path.display(),
+                            error
+                        )
+                    })?;
+                    if opened_contents != original_contents {
+                        return Err(format!(
+                            "Opening the recovered preferences backup changed its contents: {}",
+                            backup_path.display()
+                        ));
+                    }
+                    Ok(format!(
+                        "Opened recovered preferences backup without changing it:\n{}\n",
+                        backup_path.display()
+                    ))
+                })();
+
+                let (exit_code, report) = match result {
+                    Ok(report) => (0, report),
+                    Err(error) => (
+                        1,
+                        format!("Installed app recovery smoke failed: {}\n", error),
+                    ),
+                };
+                if let Err(error) = std::fs::write(&report_path, &report) {
+                    eprintln!(
+                        "Could not write recovery smoke report to {}: {}\n{}",
+                        report_path.display(),
+                        error,
+                        report
+                    );
+                    app.handle().exit(2);
+                } else {
+                    eprint!("{}", report);
+                    app.handle().exit(exit_code);
+                }
+            }
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             // BDMV Loading
             load_bdmv,
@@ -1159,6 +1250,67 @@ fn run_remux_smoke(args: &[String]) -> Result<String, String> {
         args[4],
         output.len()
     ))
+}
+
+#[cfg(test)]
+mod recovery_open_tests {
+    use super::open_recovery_backup_with;
+    use std::fs;
+    use std::path::PathBuf;
+    use uuid::Uuid;
+
+    fn temporary_backup(contents: &[u8]) -> PathBuf {
+        let directory = std::env::temp_dir().join(format!(
+            "bdmv-remuxer-recovery-open-test-{}",
+            Uuid::new_v4()
+        ));
+        fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("settings.json.corrupt.1");
+        fs::write(&path, contents).unwrap();
+        path
+    }
+
+    #[test]
+    fn recovery_open_passes_the_preserved_backup_path_to_the_shell_launcher() {
+        let original = b"{ damaged preferences";
+        let path = temporary_backup(original);
+        let mut opened_path = None;
+
+        open_recovery_backup_with(&path, |path| {
+            opened_path = Some(path.to_path_buf());
+            Ok(())
+        })
+        .unwrap();
+
+        assert_eq!(opened_path.as_deref(), Some(path.as_path()));
+        assert_eq!(fs::read(&path).unwrap(), original);
+        let _ = fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn recovery_open_reports_a_missing_backup_with_its_path() {
+        let path =
+            std::env::temp_dir().join(format!("bdmv-remuxer-missing-{}.corrupt", Uuid::new_v4()));
+        let error = open_recovery_backup_with(&path, |_| {
+            panic!("the shell launcher must not run for a missing backup")
+        })
+        .unwrap_err();
+
+        assert!(error.contains("backup is no longer available"));
+        assert!(error.contains(&path.display().to_string()));
+    }
+
+    #[test]
+    fn recovery_open_explains_operating_system_launch_failures() {
+        let path = temporary_backup(b"preserved settings");
+        let error =
+            open_recovery_backup_with(&path, |_| Err("access was denied".to_string())).unwrap_err();
+
+        assert!(error.contains("Could not open the recovered preferences backup"));
+        assert!(error.contains(&path.display().to_string()));
+        assert!(error.contains("access was denied"));
+        let _ = fs::remove_dir_all(path.parent().unwrap());
+    }
 }
 
 #[cfg(test)]

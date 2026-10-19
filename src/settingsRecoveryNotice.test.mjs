@@ -51,6 +51,16 @@ test('the recovery warning remains visible after a failed settings save', () => 
   assert.equal(isRecoveryBackupVisible(afterFailedSave.recoveryWarning, afterFailedSave.recoveryBackupAvailable), true);
 });
 
+test('a failed backup-open action is visible without hiding recovery guidance', () => {
+  const openError = 'Could not open the recovered preferences backup: access was denied.';
+
+  assert.equal(
+    getVisibleNotice(recoveryWarning, null, openError),
+    `${recoveryWarning} ${openError}`,
+  );
+  assert.equal(getVisibleNotice(null, null, openError), openError);
+});
+
 test('dismissing the warning hides it without discarding the backup availability', () => {
   const state = applyUpdate({
     error: null,

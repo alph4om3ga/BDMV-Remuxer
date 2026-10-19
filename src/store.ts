@@ -38,6 +38,7 @@ interface AppStore {
   settings: Settings | null;
   recoveryWarning: string | null;
   recoveryBackupAvailable: boolean;
+  recoveryBackupOpenError: string | null;
   recoveryRestorePreview: SettingsRecoveryPreview | null;
   recoveryRestoreError: string | null;
   isPreparingRecoveryRestore: boolean;
@@ -72,6 +73,7 @@ interface AppStore {
   restoreRecoveryBackup: () => Promise<void>;
   dismissRecoveryRestorePreview: () => void;
   dismissRecoveryWarning: () => void;
+  dismissRecoveryBackupOpenError: () => void;
   saveSettings: (settings: Settings) => Promise<void>;
   loadQueue: () => Promise<void>;
   loadCurrentVolumes: () => Promise<void>;
@@ -88,6 +90,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
   settings: null,
   recoveryWarning: null,
   recoveryBackupAvailable: false,
+  recoveryBackupOpenError: null,
   recoveryRestorePreview: null,
   recoveryRestoreError: null,
   isPreparingRecoveryRestore: false,
@@ -300,10 +303,11 @@ export const useAppStore = create<AppStore>((set, get) => ({
   },
 
   openRecoveryBackup: async () => {
+    set({ recoveryBackupOpenError: null });
     try {
       await invoke('open_settings_recovery_backup');
     } catch (e) {
-      set({ error: String(e) });
+      set({ recoveryBackupOpenError: String(e) });
     }
   },
 
@@ -356,6 +360,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
   }),
 
   dismissRecoveryWarning: () => set(getRecoveryWarningDismissUpdate()),
+  dismissRecoveryBackupOpenError: () => set({ recoveryBackupOpenError: null }),
 
   saveSettings: async (settings) => {
     try {

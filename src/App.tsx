@@ -664,6 +664,7 @@ const App: React.FC = () => {
     error,
     recoveryWarning,
     recoveryBackupAvailable,
+    recoveryBackupOpenError,
     recoveryRestorePreview,
     recoveryRestoreError,
     isPreparingRecoveryRestore,
@@ -688,6 +689,7 @@ const App: React.FC = () => {
     restoreRecoveryBackup,
     dismissRecoveryRestorePreview,
     dismissRecoveryWarning,
+    dismissRecoveryBackupOpenError,
     loadQueue,
     loadCurrentVolumes,
     loadTrackTemplates,
@@ -699,7 +701,7 @@ const App: React.FC = () => {
   const [showSettings, setShowSettings] = useState(false);
   const [editingFile, setEditingFile] = useState<{ file: MediaFile; volumeId: string } | null>(null);
   const [editingTemplate, setEditingTemplate] = useState<FileCategory | null>(null);
-  const visibleNotice = getVisibleNotice(recoveryWarning, error);
+  const visibleNotice = getVisibleNotice(recoveryWarning, error, recoveryBackupOpenError);
   const showRecoveryBackup = isRecoveryBackupVisible(recoveryWarning, recoveryBackupAvailable);
 
   const handleRestoreRecoveryBackup = async () => {
@@ -787,9 +789,11 @@ const App: React.FC = () => {
             </>
           )}
           <button
-            onClick={() => recoveryWarning
-              ? dismissRecoveryWarning()
-              : useAppStore.setState({ error: null })}
+            onClick={() => {
+              if (recoveryWarning) dismissRecoveryWarning();
+              else useAppStore.setState({ error: null });
+              dismissRecoveryBackupOpenError();
+            }}
           >
             <X size={16} />
           </button>

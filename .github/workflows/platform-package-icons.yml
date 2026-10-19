@@ -200,6 +200,91 @@ jobs:
 
       - name: Install MKVToolNix for the packaged remux check
         run: choco install mkvtoolnix --no-progress --yes
+      - name: Verify installed recovery opens the newly preserved backup
+        shell: pwsh
+        run: |
+          $exe = Join-Path $env:RUNNER_TEMP "bdmv remuxer installed\bdmv-remuxer.exe"
+          $smokeDir = Join-Path $env:RUNNER_TEMP "bdmv recovery smoke"
+          $configDir = Join-Path $smokeDir "config"
+          $report = Join-Path $smokeDir "recovery.log"
+          $capture = Join-Path $smokeDir "opened-path.txt"
+          $captureScript = Join-Path $smokeDir "capture-opened-path.ps1"
+          $settings = Join-Path $configDir "settings.json"
+          $olderBackup = Join-Path $configDir "settings.json.corrupt"
+          $expectedBackup = Join-Path $configDir "settings.json.corrupt.1"
+          $extensionKey = "HKCU:\Software\Classes\.1"
+          $programKey = "HKCU:\Software\Classes\BdmvRemuxerRecoverySmoke"
+          $commandKey = Join-Path $programKey "shell\open\command"
+          $program = "BdmvRemuxerRecoverySmoke"
+
+          New-Item -ItemType Directory -Path $configDir -Force | Out-Null
+          [System.IO.File]::WriteAllText($settings, "{ malformed preferences")
+          [System.IO.File]::WriteAllText($olderBackup, "older recovery copy")
+          $olderBackupHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $olderBackup).Hash
+          $captureLiteral = $capture.Replace("'", "''")
+          @"
+          param([string]`$Path)
+          [System.IO.File]::WriteAllText('$captureLiteral', `$Path)
+          "@ | Set-Content -LiteralPath $captureScript -Encoding UTF8
+
+          try {
+            New-Item -Path $extensionKey -Force | Out-Null
+            Set-Item -Path $extensionKey -Value $program
+            New-Item -Path $commandKey -Force | Out-Null
+            $powershell = (Get-Command powershell.exe -ErrorAction Stop).Source
+            $handler = "`"$powershell`" -NoProfile -ExecutionPolicy Bypass -File `"$captureScript`" `"%1`""
+            Set-Item -Path $commandKey -Value $handler
+
+            Remove-Item $report, $capture -Force -ErrorAction SilentlyContinue
+            & $exe --smoke-settings-recovery $configDir $report
+            $smokeExitCode = $LASTEXITCODE
+            if ($smokeExitCode -ne 0) {
+              if (Test-Path $report) { Get-Content $report | Write-Host }
+              throw "The installed app recovery smoke failed with exit code $smokeExitCode."
+            }
+            if (-not (Test-Path $report)) {
+              throw "The installed app did not create its recovery smoke report."
+            }
+            $reportText = Get-Content -LiteralPath $report -Raw
+            Write-Host $reportText
+            if ($reportText -notmatch [regex]::Escape($expectedBackup)) {
+              throw "The installed app did not report the newly preserved backup path: $expectedBackup"
+            }
+
+            $handlerReceivedPath = $false
+            for ($attempt = 0; $attempt -lt 30; $attempt++) {
+              if (Test-Path $capture) {
+                $openedPath = [System.IO.File]::ReadAllText($capture)
+                if ($openedPath -and [string]::Equals(
+                  [System.IO.Path]::GetFullPath($openedPath),
+                  [System.IO.Path]::GetFullPath($expectedBackup),
+                  [System.StringComparison]::OrdinalIgnoreCase
+                )) {
+                  $handlerReceivedPath = $true
+                  break
+                }
+              }
+              Start-Sleep -Seconds 1
+            }
+            if (-not $handlerReceivedPath) {
+              $actualPath = if (Test-Path $capture) {
+                [System.IO.File]::ReadAllText($capture)
+              } else {
+                "The registered Windows file handler was never launched."
+              }
+              throw "The installed app did not open the newly preserved backup. Expected '$expectedBackup'; received '$actualPath'."
+            }
+            if ((Get-FileHash -Algorithm SHA256 -LiteralPath $olderBackup).Hash -ne $olderBackupHash) {
+              throw "Opening the recovered backup changed the pre-existing backup."
+            }
+            if ([System.IO.File]::ReadAllText($expectedBackup) -cne "{ malformed preferences") {
+              throw "The newly preserved backup contents changed during the open check."
+            }
+            Write-Host "The installed app opened the newly preserved backup, and both backup files remain unchanged."
+          }
+          finally {
+            Remove-Item $extensionKey, $programKey -Recurse -Force -ErrorAction SilentlyContinue
+          }
       - name: Run a remux with the installed Windows application
         shell: pwsh
         run: |
