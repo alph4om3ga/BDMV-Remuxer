@@ -859,6 +859,7 @@ async fn get_settings(state: State<'_, AppStateType>) -> Result<SettingsResponse
         settings: app_state.settings.clone(),
         recovery_warning: app_state.settings_recovery_warning().map(str::to_string),
         recovery_backup_available: app_state.settings_recovery_backup_path().is_some(),
+        settings_save_allowed: app_state.settings_can_save(),
     })
 }
 
@@ -867,6 +868,7 @@ struct SettingsResponse {
     settings: Settings,
     recovery_warning: Option<String>,
     recovery_backup_available: bool,
+    settings_save_allowed: bool,
 }
 
 #[tauri::command]

@@ -10,7 +10,11 @@ import {
 import { formatDuration, formatSize, getCategoryColor, getFileNumber, formatFileLabel } from './utils/format';
 import type { MediaFile, Track, Volume, Project, Settings as SettingsType, FileCategory } from './types';
 import { CATEGORIES, LANGUAGES } from './types';
-import { getVisibleNotice, isRecoveryBackupVisible } from './settingsRecoveryNotice.js';
+import {
+  getSettingsSaveState,
+  getVisibleNotice,
+  isRecoveryBackupVisible,
+} from './settingsRecoveryNotice.js';
 import './App.css';
 
 // ============================================================================
@@ -338,6 +342,8 @@ const TrackEditor: React.FC<TrackEditorProps> = ({ file, volumeId, onClose }) =>
 interface SettingsModalProps {
   settings: SettingsType;
   recoveryBackupAvailable: boolean;
+  settingsSaveAllowed: boolean;
+  recoveryWarning: string | null;
   onRestoreBackup: () => void;
   onClose: () => void;
 }
@@ -345,12 +351,15 @@ interface SettingsModalProps {
 const SettingsModal: React.FC<SettingsModalProps> = ({
   settings: initialSettings,
   recoveryBackupAvailable,
+  settingsSaveAllowed,
+  recoveryWarning,
   onRestoreBackup,
   onClose,
 }) => {
   const { saveSettings } = useAppStore();
   const [settings, setSettings] = useState<SettingsType>(initialSettings);
   const [browseError, setBrowseError] = useState<string | null>(null);
+  const saveState = getSettingsSaveState(settingsSaveAllowed, recoveryWarning);
   
   const handleSave = async () => {
     await saveSettings(settings);
@@ -377,6 +386,9 @@ const SettingsModal: React.FC<SettingsModalProps> = ({
           <button className="modal-close" onClick={onClose}><X size={20} /></button>
         </div>
         <div className="modal-body settings-panel">
+          {saveState.warning && (
+            <p className="settings-error" role="alert">{saveState.warning}</p>
+          )}
           <div className="settings-group">
             <h4>Tools</h4>
             
@@ -531,7 +543,7 @@ const SettingsModal: React.FC<SettingsModalProps> = ({
         </div>
         <div className="modal-footer">
           <button className="btn secondary" onClick={onClose}>Cancel</button>
-          <button className="btn primary" onClick={handleSave}>
+          <button className="btn primary" onClick={handleSave} disabled={saveState.disabled}>
             <Check size={16} /> Save Settings
           </button>
         </div>
@@ -664,6 +676,7 @@ const App: React.FC = () => {
     error,
     recoveryWarning,
     recoveryBackupAvailable,
+    settingsSaveAllowed,
     recoveryBackupOpenError,
     recoveryRestorePreview,
     recoveryRestoreError,
@@ -1007,6 +1020,8 @@ const App: React.FC = () => {
         <SettingsModal 
           settings={settings}
           recoveryBackupAvailable={recoveryBackupAvailable}
+          settingsSaveAllowed={settingsSaveAllowed}
+          recoveryWarning={recoveryWarning}
           onRestoreBackup={previewRecoveryBackup}
           onClose={() => setShowSettings(false)}
         />

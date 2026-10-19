@@ -4,12 +4,14 @@ interface SettingsResponse {
   settings: Settings;
   recovery_warning: string | null;
   recovery_backup_available: boolean;
+  settings_save_allowed: boolean;
 }
 
 export function getSettingsLoadUpdate(response: SettingsResponse): {
   settings: Settings;
   recoveryWarning: string | null;
   recoveryBackupAvailable: boolean;
+  settingsSaveAllowed: boolean;
   recoveryBackupOpenError: null;
 };
 export function getSettingsSaveSuccessUpdate(settings: Settings): {
@@ -17,8 +19,13 @@ export function getSettingsSaveSuccessUpdate(settings: Settings): {
   error: null;
   recoveryWarning: null;
   recoveryBackupAvailable: false;
+  settingsSaveAllowed: true;
   recoveryBackupOpenError: null;
 };
+export function getSettingsSaveState(
+  settingsSaveAllowed: boolean,
+  recoveryWarning: string | null,
+): { disabled: boolean; warning: string | null };
 export function getSettingsSaveFailureUpdate(error: unknown): { error: string };
 export function getRecoveryWarningDismissUpdate(): { recoveryWarning: null };
 export function getVisibleNotice(

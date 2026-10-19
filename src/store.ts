@@ -38,6 +38,7 @@ interface AppStore {
   settings: Settings | null;
   recoveryWarning: string | null;
   recoveryBackupAvailable: boolean;
+  settingsSaveAllowed: boolean;
   recoveryBackupOpenError: string | null;
   recoveryRestorePreview: SettingsRecoveryPreview | null;
   recoveryRestoreError: string | null;
@@ -90,6 +91,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
   settings: null,
   recoveryWarning: null,
   recoveryBackupAvailable: false,
+  settingsSaveAllowed: true,
   recoveryBackupOpenError: null,
   recoveryRestorePreview: null,
   recoveryRestoreError: null,
@@ -295,6 +297,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
         settings: Settings;
         recovery_warning: string | null;
         recovery_backup_available: boolean;
+        settings_save_allowed: boolean;
       }>('get_settings');
       set(getSettingsLoadUpdate(response));
     } catch (e) {

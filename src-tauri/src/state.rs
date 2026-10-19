@@ -704,6 +704,10 @@ impl AppState {
         self.settings_recovery_backup_path.as_deref()
     }
 
+    pub fn settings_can_save(&self) -> bool {
+        !self.settings_save_blocked
+    }
+
     pub fn ensure_settings_savable(&self) -> Result<(), String> {
         if self.settings_save_blocked {
             return Err(self.settings_recovery_warning.clone().unwrap_or_else(|| {
@@ -1098,6 +1102,7 @@ mod tests {
             false,
         );
 
+        assert!(!state.settings_can_save());
         let error = state.ensure_settings_savable().unwrap_err();
         assert!(error.contains("Could not preserve damaged preferences"));
     }

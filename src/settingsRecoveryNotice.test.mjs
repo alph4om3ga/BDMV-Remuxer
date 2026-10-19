@@ -4,6 +4,7 @@ import {
   getRecoveryWarningDismissUpdate,
   getSettingsLoadUpdate,
   getSettingsSaveFailureUpdate,
+  getSettingsSaveState,
   getSettingsSaveSuccessUpdate,
   getVisibleNotice,
   isRecoveryBackupVisible,
@@ -22,6 +23,7 @@ test('malformed settings response shows the recovery warning and its backup acti
     settings,
     recovery_warning: recoveryWarning,
     recovery_backup_available: true,
+    settings_save_allowed: true,
   };
   const state = applyUpdate({
     error: null,
@@ -43,6 +45,7 @@ test('the recovery warning remains visible after a failed settings save', () => 
     settings,
     recovery_warning: recoveryWarning,
     recovery_backup_available: true,
+    settings_save_allowed: true,
   }));
   const afterFailedSave = applyUpdate(recovered, getSettingsSaveFailureUpdate('settings are read-only'));
 
@@ -83,4 +86,32 @@ test('a successful settings save clears the recovery warning and backup action',
   assert.equal(state.settings, settings);
   assert.equal(getVisibleNotice(state.recoveryWarning, state.error), null);
   assert.equal(isRecoveryBackupVisible(state.recoveryWarning, state.recoveryBackupAvailable), false);
+  assert.equal(state.settingsSaveAllowed, true);
+});
+
+test('settings save is disabled with the recovery explanation when preservation failed', () => {
+  const warning = 'A recovery copy could not be created because permission was denied.';
+  const state = applyUpdate({
+    error: null,
+    recoveryWarning: null,
+    recoveryBackupAvailable: false,
+    settingsSaveAllowed: true,
+  }, getSettingsLoadUpdate({
+    settings,
+    recovery_warning: warning,
+    recovery_backup_available: false,
+    settings_save_allowed: false,
+  }));
+  const saveState = getSettingsSaveState(state.settingsSaveAllowed, state.recoveryWarning);
+
+  assert.equal(state.settingsSaveAllowed, false);
+  assert.equal(saveState.disabled, true);
+  assert.equal(saveState.warning, warning);
+});
+
+test('settings save is enabled when the damaged preferences were preserved', () => {
+  const saveState = getSettingsSaveState(true, recoveryWarning);
+
+  assert.equal(saveState.disabled, false);
+  assert.equal(saveState.warning, null);
 });
