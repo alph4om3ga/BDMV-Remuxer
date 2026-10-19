@@ -506,6 +506,45 @@ mod tests {
     }
 
     #[test]
+    fn settings_from_before_newer_fields_were_added_keep_saved_values_and_default_missing_fields() {
+        let config_dir = temporary_config_dir();
+        std::fs::create_dir_all(&config_dir).unwrap();
+        std::fs::write(
+            config_dir.join("settings.json"),
+            include_str!("../tests/fixtures/settings-before-newer-fields.json"),
+        )
+        .unwrap();
+
+        let outcome = Settings::load_with_recovery(&config_dir);
+        let defaults = Settings::default();
+
+        assert!(outcome.recovery_warning.is_none());
+        assert!(outcome.can_save);
+        assert_eq!(outcome.settings.mkvmerge_path, "/opt/tools/mkvmerge");
+        assert_eq!(outcome.settings.ffprobe_path, "/opt/tools/ffprobe");
+        assert_eq!(outcome.settings.min_episode_duration, 1500);
+        assert_eq!(outcome.settings.min_extra_duration, 180);
+        assert_eq!(
+            outcome.settings.op_ed_min_duration,
+            defaults.op_ed_min_duration
+        );
+        assert_eq!(
+            outcome.settings.op_ed_max_duration,
+            defaults.op_ed_max_duration
+        );
+        assert_eq!(
+            outcome.settings.episode_folder_name,
+            defaults.episode_folder_name
+        );
+        assert_eq!(
+            outcome.settings.extra_folder_name,
+            defaults.extra_folder_name
+        );
+
+        std::fs::remove_dir_all(config_dir).unwrap();
+    }
+
+    #[test]
     fn malformed_settings_are_preserved_and_defaults_can_be_saved_as_a_reset() {
         let config_dir = temporary_config_dir();
         std::fs::create_dir_all(&config_dir).unwrap();

@@ -1,0 +1,6 @@
+{
+  "mkvmerge_path": "/opt/tools/mkvmerge",
+  "ffprobe_path": "/opt/tools/ffprobe",
+  "min_episode_duration": 1500,
+  "min_extra_duration": 180
+}
