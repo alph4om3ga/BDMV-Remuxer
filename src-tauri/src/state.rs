@@ -1103,6 +1103,25 @@ mod tests {
     }
 
     #[test]
+    fn unreadable_settings_file_blocks_saving_with_a_recovery_warning() {
+        let config_dir = temporary_config_dir();
+        std::fs::create_dir_all(&config_dir).unwrap();
+        let settings_path = config_dir.join("settings.json");
+        std::fs::create_dir(&settings_path).unwrap();
+
+        let outcome = Settings::load_with_recovery(&config_dir);
+        let warning = outcome.recovery_warning.as_deref().unwrap();
+
+        assert!(!outcome.can_save);
+        assert!(warning.contains("Saved preferences could not be read"));
+        assert!(warning.contains("saving is disabled"));
+        assert!(warning.contains("could not be read"));
+        assert!(warning.contains(&settings_path.display().to_string()));
+
+        std::fs::remove_dir_all(config_dir).unwrap();
+    }
+
+    #[test]
     fn startup_removes_only_stale_settings_temporary_files_and_preserves_settings() {
         let config_dir = temporary_config_dir();
         std::fs::create_dir_all(&config_dir).unwrap();

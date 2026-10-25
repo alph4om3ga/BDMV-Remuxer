@@ -18,6 +18,29 @@ function applyUpdate(state, update) {
   return { ...state, ...update };
 }
 
+test('unreadable settings response disables saving and shows why it is blocked', () => {
+  const warning = 'Saved preferences could not be read at /home/user/.config/bdmv-remuxer/settings.json: access denied. Defaults are active; saving is disabled to avoid replacing preferences that could not be read.';
+  const state = applyUpdate({
+    error: null,
+    recoveryWarning: null,
+    recoveryBackupAvailable: false,
+    settingsSaveAllowed: true,
+  }, getSettingsLoadUpdate({
+    settings,
+    recovery_warning: warning,
+    recovery_backup_available: false,
+    settings_save_allowed: false,
+    recovery_retry_available: false,
+  }));
+  const saveState = getSettingsSaveState(state.settingsSaveAllowed, state.recoveryWarning);
+
+  assert.equal(state.settingsSaveAllowed, false);
+  assert.equal(saveState.disabled, true);
+  assert.equal(saveState.warning, warning);
+  assert.equal(getVisibleNotice(state.recoveryWarning, state.error), warning);
+  assert.match(warning, /saving is disabled.*could not be read/);
+});
+
 test('malformed settings response shows the recovery warning and its backup action', () => {
   const response = {
     settings,
