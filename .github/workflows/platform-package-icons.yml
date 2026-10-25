@@ -227,8 +227,8 @@ jobs:
         shell: pwsh
         run: |
           $exe = Join-Path $env:RUNNER_TEMP "bdmv remuxer installed\bdmv-remuxer.exe"
-          $smokeDir = Join-Path $env:RUNNER_TEMP "bdmv recovery smoke"
-          $configDir = Join-Path $smokeDir "config"
+          $smokeDir = Join-Path $env:RUNNER_TEMP "bdmv recuperación smoke"
+          $configDir = Join-Path $smokeDir "configuración"
           $report = Join-Path $smokeDir "recovery.log"
           $capture = Join-Path $smokeDir "opened-path.txt"
           $captureScript = Join-Path $smokeDir "capture-opened-path.ps1"
@@ -278,10 +278,10 @@ jobs:
             for ($attempt = 0; $attempt -lt 30; $attempt++) {
               if (Test-Path $capture) {
                 $openedPath = [System.IO.File]::ReadAllText($capture)
-                if ($openedPath -and [string]::Equals(
-                  [System.IO.Path]::GetFullPath($openedPath),
-                  [System.IO.Path]::GetFullPath($expectedBackup),
-                  [System.StringComparison]::OrdinalIgnoreCase
+                if ([string]::Equals(
+                  $openedPath,
+                  $expectedBackup,
+                  [System.StringComparison]::Ordinal
                 )) {
                   $handlerReceivedPath = $true
                   break
