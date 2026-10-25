@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { useAppStore } from './store';
-import { browseForToolPath } from './toolPathPicker.js';
+import { browseForToolPath, openToolPathPicker } from './toolPathPicker.js';
 import { confirm, open } from '@tauri-apps/api/dialog';
 import { 
   FolderOpen, Play, Pause, Settings, ChevronRight, ChevronDown, 
@@ -436,7 +436,7 @@ const SettingsModal: React.FC<SettingsModalProps> = ({
   const browseForExecutable = async (setting: 'mkvmerge_path' | 'ffprobe_path', title: string) => {
     await browseForToolPath(
       setting,
-      () => open({ title, multiple: false, directory: false }),
+      () => openToolPathPicker(open, title, settings[setting]),
       setSettings,
       setBrowseError,
     );
