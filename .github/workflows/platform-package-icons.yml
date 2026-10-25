@@ -311,7 +311,7 @@ jobs:
         run: |
           $exe = Join-Path $env:RUNNER_TEMP "bdmv remuxer installed\bdmv-remuxer.exe"
           $mkvmerge = (Get-Command mkvmerge.exe -ErrorAction Stop).Source
-          $fixture = Join-Path $env:GITHUB_WORKSPACE "src-tauri\tests\fixtures\remux-smoke-input.mkv"
+          $fixture = Join-Path $env:GITHUB_WORKSPACE "src-tauri\tests\fixtures\remux-multitrack-smoke-input.mkv"
           $output = Join-Path $env:RUNNER_TEMP "bdmv-remuxer-smoke-output.mkv"
           $report = Join-Path $env:RUNNER_TEMP "bdmv-remuxer-smoke.log"
 
@@ -337,11 +337,36 @@ jobs:
             throw "mkvmerge could not inspect the remux output (exit code $probeExitCode)."
           }
           $probe = (Get-Content $probeLog -Raw) | ConvertFrom-Json
-          if ($probe.container.type -notmatch "Matroska" -or $probe.tracks.Count -lt 1) {
+          $videoTracks = @($probe.tracks | Where-Object { $_.type -eq "video" })
+          $audioTracks = @($probe.tracks | Where-Object { $_.type -eq "audio" })
+          $subtitleTracks = @($probe.tracks | Where-Object { $_.type -eq "subtitles" })
+          if (
+            $probe.container.type -notmatch "Matroska" -or
+            $videoTracks.Count -ne 1 -or
+            $audioTracks.Count -ne 2 -or
+            $subtitleTracks.Count -ne 2
+          ) {
             Get-Content $probeLog | Write-Host
-            throw "The remux output is not a Matroska file with at least one track."
+            throw "The remux output must contain one video, two audio, and two subtitle tracks."
           }
-          Write-Host "Verified installed-app remux output: $($probe.tracks.Count) track(s), $((Get-Item $output).Length) bytes."
+          $expectedTracks = @(
+            @{ Type = "audio"; Language = "eng"; Name = "Selected English Audio" },
+            @{ Type = "audio"; Language = "jpn"; Name = "Selected Japanese Commentary" },
+            @{ Type = "subtitles"; Language = "eng"; Name = "Selected English Captions" },
+            @{ Type = "subtitles"; Language = "jpn"; Name = "Selected Japanese Captions" }
+          )
+          foreach ($expected in $expectedTracks) {
+            $matches = @($probe.tracks | Where-Object {
+              $_.type -eq $expected.Type -and
+              $_.properties.language -eq $expected.Language -and
+              $_.properties.track_name -eq $expected.Name
+            })
+            if ($matches.Count -ne 1) {
+              Get-Content $probeLog | Write-Host
+              throw "The remux output is missing the expected $($expected.Type) track '$($expected.Name)' ($($expected.Language))."
+            }
+          }
+          Write-Host "Verified installed-app remux output: one video, two audio, two subtitle tracks, and all selected language/name settings."
       - name: Verify native close waits for the active file and resumes the queue
         shell: pwsh
         run: |
@@ -528,7 +553,7 @@ jobs:
           app="$(find "$mount_point" -maxdepth 2 -type d -name '*.app' -print -quit)"
           binary="$app/Contents/MacOS/bdmv-remuxer"
           mkvmerge="$(command -v mkvmerge)"
-          fixture="$GITHUB_WORKSPACE/src-tauri/tests/fixtures/remux-smoke-input.mkv"
+          fixture="$GITHUB_WORKSPACE/src-tauri/tests/fixtures/remux-multitrack-smoke-input.mkv"
           output="$RUNNER_TEMP/bdmv-remuxer-smoke-output.mkv"
           report="$RUNNER_TEMP/bdmv-remuxer-smoke.log"
           probe_log="$RUNNER_TEMP/bdmv-remuxer-smoke-probe.log"
@@ -548,8 +573,17 @@ jobs:
             exit 1
           fi
           cat "$probe_log"
-          jq -e '(.container.type | test("Matroska")) and (.tracks | length > 0)' "$probe_log" >/dev/null || {
-            echo "The remux output is not a Matroska file with at least one track." >&2
+          jq -e '
+            (.container.type | test("Matroska")) and
+            ([.tracks[] | select(.type == "video")] | length == 1) and
+            ([.tracks[] | select(.type == "audio")] | length == 2) and
+            ([.tracks[] | select(.type == "subtitles")] | length == 2) and
+            any(.tracks[]; .type == "audio" and .properties.language == "eng" and .properties.track_name == "Selected English Audio") and
+            any(.tracks[]; .type == "audio" and .properties.language == "jpn" and .properties.track_name == "Selected Japanese Commentary") and
+            any(.tracks[]; .type == "subtitles" and .properties.language == "eng" and .properties.track_name == "Selected English Captions") and
+            any(.tracks[]; .type == "subtitles" and .properties.language == "jpn" and .properties.track_name == "Selected Japanese Captions")
+          ' "$probe_log" >/dev/null || {
+            echo "The remux output is missing expected video, audio, subtitle, language, or track-name metadata." >&2
             exit 1
           }
-          echo "Verified installed-app remux output: $(stat -f%z "$output") bytes."
+          echo "Verified installed-app remux output: one video, two audio, two subtitle tracks, and all selected language/name settings."

@@ -1502,11 +1502,28 @@ fn run_remux_smoke(args: &[String]) -> Result<String, String> {
         );
     }
 
+    let selected_track = |id: i32, track_type: &str, language: &str, name: &str| Track {
+        id,
+        track_type: track_type.into(),
+        codec: String::new(),
+        language: language.into(),
+        name: name.into(),
+        default: false,
+        forced: false,
+        resolution: None,
+        channels: None,
+    };
     let job = MuxJob {
         input_path: args[3].clone(),
         output_path: args[4].clone(),
         chapter_path: None,
-        tracks: Vec::new(),
+        // Keep these aligned with the ordered streams in the multitrack fixture.
+        tracks: vec![
+            selected_track(1, "audio", "eng", "Selected English Audio"),
+            selected_track(2, "audio", "jpn", "Selected Japanese Commentary"),
+            selected_track(3, "subtitle", "eng", "Selected English Captions"),
+            selected_track(4, "subtitle", "jpn", "Selected Japanese Captions"),
+        ],
     };
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
