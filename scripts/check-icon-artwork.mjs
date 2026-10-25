@@ -23,7 +23,24 @@ const ringThresholds = {
     { radius: 196, minimum: 0.05, label: "inner disc edge" },
     { radius: 128, minimum: 0.3, label: "center opening" },
   ],
+  48: [
+    { radius: 290, minimum: 0.08, label: "outer disc ring" },
+    { radius: 248, minimum: 0.06, label: "bright disc ring" },
+    { radius: 196, minimum: 0.05, label: "inner disc edge" },
+    { radius: 128, minimum: 0.3, label: "center opening" },
+  ],
+  64: [
+    { radius: 290, minimum: 0.08, label: "outer disc ring" },
+    { radius: 248, minimum: 0.08, label: "bright disc ring" },
+    { radius: 196, minimum: 0.05, label: "inner disc edge" },
+    { radius: 128, minimum: 0.3, label: "center opening" },
+  ],
 };
+
+const iconSizes = [16, 32, 48, 64];
+const minimumPlayPixels = { 16: 2, 32: 2, 48: 4, 64: 6 };
+const minimumArrowPixels = { 16: 8, 32: 20, 48: 45, 64: 80 };
+const ringSampleOffsets = { 16: 24, 32: 24, 48: 12, 64: 8 };
 
 function luminance([red, green, blue]) {
   const linear = [red, green, blue].map((channel) => {
@@ -90,7 +107,7 @@ function analyzePlaySymbol(data, size) {
   };
 }
 
-function analyzeRingBoundary(data, size, radius) {
+function analyzeRingBoundary(data, size, radius, sampleOffset) {
   const pixelAt = (x, y) => {
     const offset = (y * size + x) * 3;
     return luminance(data.subarray(offset, offset + 3));
@@ -108,7 +125,9 @@ function analyzeRingBoundary(data, size, radius) {
     };
 
     differences.push(
-      Math.abs(luminanceAtOffset(-24) - luminanceAtOffset(24)),
+      Math.abs(
+        luminanceAtOffset(-sampleOffset) - luminanceAtOffset(sampleOffset),
+      ),
     );
   }
 
@@ -125,7 +144,7 @@ export async function checkIconArtwork(sourcePath = defaultSourcePath) {
   }
   const withoutArrow = Buffer.from(sourceSvg.replace(arrowPath, ""));
 
-  for (const size of [16, 32]) {
+  for (const size of iconSizes) {
     const [raster, arrowlessRaster] = await Promise.all([
       sharp(sourcePath)
         .resize(size, size, { fit: "contain" })
@@ -149,10 +168,10 @@ export async function checkIconArtwork(sourcePath = defaultSourcePath) {
       `${size}px play symbol: ${play.visiblePixels} high-contrast pixels, ` +
         `${play.contrastRatio.toFixed(1)}:1 peak contrast`,
     );
-    if (play.visiblePixels < 2) {
+    if (play.visiblePixels < minimumPlayPixels[size]) {
       failures.push(
         `${size}px play triangle has only ${play.visiblePixels} clearly separated ` +
-          "pixel(s); expected at least 2",
+          `pixel(s); expected at least ${minimumPlayPixels[size]}`,
       );
     }
 
@@ -164,20 +183,25 @@ export async function checkIconArtwork(sourcePath = defaultSourcePath) {
         Math.abs(data[index + 2] - arrowlessRaster.data[index + 2]);
       return count + (difference >= 20 ? 1 : 0);
     }, 0);
-    const minimumArrowPixels = size === 16 ? 8 : 20;
+    const minimumArrowPixelCount = minimumArrowPixels[size];
     metrics.push(
       `${size}px disc arrow: ${arrowPixels} pixels differ from the disc beneath it ` +
-        `(minimum ${minimumArrowPixels})`,
+        `(minimum ${minimumArrowPixelCount})`,
     );
-    if (arrowPixels < minimumArrowPixels) {
+    if (arrowPixels < minimumArrowPixelCount) {
       failures.push(
         `${size}px disc arrow has only ${arrowPixels} pixels with clear visual ` +
-          `separation; expected at least ${minimumArrowPixels}`,
+          `separation; expected at least ${minimumArrowPixelCount}`,
       );
     }
 
     for (const { radius, minimum, label } of ringThresholds[size]) {
-      const contrast = analyzeRingBoundary(data, size, radius);
+      const contrast = analyzeRingBoundary(
+        data,
+        size,
+        radius,
+        ringSampleOffsets[size],
+      );
       metrics.push(
         `${size}px ${label}: ${contrast.toFixed(3)} mean edge contrast ` +
           `(minimum ${minimum.toFixed(3)})`,
