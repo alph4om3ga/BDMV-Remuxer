@@ -42,3 +42,26 @@ for (const [description, muxerStatus] of [
     );
   });
 }
+
+test('a rejected retry does not update the visible queue or start muxing', async () => {
+  const calls = [];
+  let onRetryCalled = false;
+
+  await assert.rejects(
+    retryProjectWithQueue('failed-project', {
+      retry: async () => {
+        calls.push(['retry']);
+        throw new Error('Retry was not accepted because the updated queue could not be saved.');
+      },
+      startMuxing: async () => calls.push(['start']),
+      getMuxerStatus: () => ({ is_running: false, is_paused: false }),
+      onRetry: () => {
+        onRetryCalled = true;
+      },
+    }),
+    /Retry was not accepted because the updated queue could not be saved/,
+  );
+
+  assert.deepEqual(calls, [['retry']]);
+  assert.equal(onRetryCalled, false);
+});

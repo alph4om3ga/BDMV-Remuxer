@@ -563,10 +563,7 @@ async fn retry_project(
     state: State<'_, AppStateType>,
 ) -> Result<Project, String> {
     let mut app_state = state.lock();
-    let retried_project = prepare_project_retry(&mut app_state, &project_id)?;
-
-    app_state.persist_workspace()?;
-    Ok(retried_project)
+    retry_project_and_persist(&mut app_state, &project_id)
 }
 
 #[tauri::command]
@@ -603,8 +600,14 @@ fn prepare_project_output_path_update(
 }
 
 fn prepare_project_retry(app_state: &mut AppState, project_id: &str) -> Result<Project, String> {
-    let project = app_state
-        .queue
+    prepare_project_retry_in_queue(&mut app_state.queue, project_id)
+}
+
+fn prepare_project_retry_in_queue(
+    queue: &mut [Project],
+    project_id: &str,
+) -> Result<Project, String> {
+    let project = queue
         .iter_mut()
         .find(|project| project.id == project_id)
         .ok_or_else(|| "Project was not found in the queue".to_string())?;
@@ -615,6 +618,26 @@ fn prepare_project_retry(app_state: &mut AppState, project_id: &str) -> Result<P
 
     project.prepare_retry();
     Ok(project.clone())
+}
+
+fn retry_project_and_persist(
+    app_state: &mut AppState,
+    project_id: &str,
+) -> Result<Project, String> {
+    let mut candidate_queue = app_state.queue.clone();
+    let retried_project = prepare_project_retry_in_queue(&mut candidate_queue, project_id)?;
+
+    app_state
+        .persist_workspace_with_queue(&candidate_queue)
+        .map_err(|error| {
+            format!(
+                "Retry was not accepted because the updated queue could not be saved. The project remains available to retry after fixing the workspace save problem. {}",
+                error
+            )
+        })?;
+
+    app_state.queue = candidate_queue;
+    Ok(retried_project)
 }
 
 #[tauri::command]
@@ -2216,13 +2239,14 @@ mod close_tests {
 mod queue_retry_tests {
     use super::{
         ensure_muxer_idle, prepare_project_output_path_update, prepare_project_retry, queue_action,
-        QueueAction,
+        retry_project_and_persist, QueueAction,
     };
     use crate::bdmv::{MediaFile, Volume};
     use crate::muxer::Muxer;
     use crate::state::{AppState, CompletedFile, Project, ProjectStatus};
     use chrono::Utc;
     use std::collections::HashMap;
+    use std::fs;
 
     fn retry_state() -> AppState {
         let successful_path = "/disc/BDMV/STREAM/00001.m2ts";
@@ -2301,6 +2325,55 @@ mod queue_retry_tests {
             "the queued project must retain the same successful-file markers"
         );
         assert_eq!(state.queue[1].progress, 50.0);
+    }
+
+    #[test]
+    fn failed_retry_save_keeps_project_retryable_and_completed_markers_persisted() {
+        let config_dir =
+            std::env::temp_dir().join(format!("bdmv-retry-save-failure-{}", uuid::Uuid::new_v4()));
+        let mut state = retry_state();
+        fs::create_dir_all(&config_dir).unwrap();
+        let initial_workspace = serde_json::json!({ "queue": &state.queue });
+        fs::write(
+            config_dir.join("workspace.json"),
+            serde_json::to_vec(&initial_workspace).unwrap(),
+        )
+        .unwrap();
+        state.restore_workspace(&config_dir).unwrap();
+
+        let temporary_path = config_dir.join("workspace.json.tmp");
+        fs::create_dir(&temporary_path).unwrap();
+        let error = retry_project_and_persist(&mut state, "failed-project").unwrap_err();
+
+        assert!(error.contains("Retry was not accepted"));
+        assert!(error.contains("remains available to retry"));
+        assert!(error.contains("Failed to write saved work"));
+        assert_eq!(state.queue[1].status, ProjectStatus::Error);
+        assert_eq!(state.queue[1].error.as_deref(), Some("mux failed"));
+        assert_eq!(state.queue[1].completed_files.len(), 1);
+
+        let saved_workspace: serde_json::Value =
+            serde_json::from_slice(&fs::read(config_dir.join("workspace.json")).unwrap()).unwrap();
+        assert_eq!(saved_workspace["queue"][1]["status"], "error");
+        assert_eq!(
+            saved_workspace["queue"][1]["completed_files"][0]["path"],
+            "/disc/BDMV/STREAM/00001.m2ts"
+        );
+
+        fs::remove_dir(&temporary_path).unwrap();
+        let retried = retry_project_and_persist(&mut state, "failed-project").unwrap();
+        assert_eq!(retried.status, ProjectStatus::Pending);
+        assert_eq!(state.queue[1].status, ProjectStatus::Pending);
+        assert_eq!(state.queue[1].completed_files.len(), 1);
+
+        let saved_workspace: serde_json::Value =
+            serde_json::from_slice(&fs::read(config_dir.join("workspace.json")).unwrap()).unwrap();
+        assert_eq!(saved_workspace["queue"][1]["status"], "pending");
+        assert_eq!(
+            saved_workspace["queue"][1]["completed_files"][0]["path"],
+            "/disc/BDMV/STREAM/00001.m2ts"
+        );
+        fs::remove_dir_all(config_dir).unwrap();
     }
 
     #[test]

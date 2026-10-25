@@ -1041,6 +1041,10 @@ impl AppState {
     }
 
     pub fn persist_workspace(&self) -> Result<(), String> {
+        self.persist_workspace_with_queue(&self.queue)
+    }
+
+    pub fn persist_workspace_with_queue(&self, queue: &[Project]) -> Result<(), String> {
         self.ensure_workspace_available()?;
         let config_dir = self
             .persistence_path
@@ -1048,7 +1052,7 @@ impl AppState {
             .ok_or_else(|| "Workspace persistence is not configured".to_string())?;
         WorkspaceData {
             current_volumes: self.current_volumes.clone(),
-            queue: self.queue.clone(),
+            queue: queue.to_vec(),
             track_templates: self.track_templates.clone(),
         }
         .save(config_dir)
