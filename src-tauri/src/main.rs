@@ -1383,6 +1383,15 @@ async fn restore_settings_recovery_backup(
     expected_source_hash: String,
     state: State<'_, AppStateType>,
 ) -> Result<SettingsSaveResponse, String> {
+    let config_dir = settings_config_dir()?;
+    restore_settings_recovery_backup_with(&expected_source_hash, &state, &config_dir)
+}
+
+fn restore_settings_recovery_backup_with(
+    expected_source_hash: &str,
+    state: &AppStateType,
+    config_dir: &Path,
+) -> Result<SettingsSaveResponse, String> {
     let backup_path = {
         let app_state = state.lock();
         app_state.ensure_settings_savable()?;
@@ -1398,8 +1407,7 @@ async fn restore_settings_recovery_backup(
                 .to_string(),
         );
     }
-    let config_dir = settings_config_dir()?;
-    let saved_settings = preview.settings.save_to_config_dir(&config_dir)?;
+    let saved_settings = preview.settings.save_to_config_dir(config_dir)?;
 
     let mut app_state = state.lock();
     app_state.settings = saved_settings.clone();
@@ -1887,6 +1895,106 @@ mod recovery_open_tests {
         assert!(error.contains(&path.display().to_string()));
         assert!(error.contains("access was denied"));
         let _ = fs::remove_dir_all(path.parent().unwrap());
+    }
+}
+
+#[cfg(test)]
+mod settings_recovery_restore_tests {
+    use super::{restore_settings_recovery_backup_with, AppStateType};
+    use crate::state::{AppState, Settings};
+    use parking_lot::Mutex;
+    use serde_json::Value;
+    use std::fs;
+    use std::sync::Arc;
+    use uuid::Uuid;
+
+    #[test]
+    fn restoring_newer_version_settings_preserves_nested_values_and_warning_after_known_edit() {
+        let config_dir = std::env::temp_dir().join(format!(
+            "bdmv-remuxer-recovery-restore-test-{}",
+            Uuid::new_v4()
+        ));
+        fs::create_dir_all(&config_dir).unwrap();
+        let backup_path = config_dir.join("settings.json.corrupt");
+        let newer_setting = serde_json::json!({
+            "enabled": true,
+            "profile": {
+                "name": "future-profile",
+                "options": ["keep-audio", "keep-chapters"]
+            }
+        });
+        fs::write(
+            &backup_path,
+            serde_json::to_vec(&serde_json::json!({
+                "mkvmerge_path": "/restored/tools/mkvmerge",
+                "min_extra_duration": 240,
+                "future_preference": newer_setting,
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let preview = Settings::preview_recovery_backup(&backup_path).unwrap();
+        assert_eq!(
+            preview.settings.unrecognized["future_preference"],
+            newer_setting
+        );
+        assert!(preview
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("future_preference")));
+
+        let app_state: AppStateType = Arc::new(Mutex::new(AppState::default()));
+        app_state.lock().set_settings_recovery(
+            Some("Damaged preferences were preserved.".into()),
+            Some(backup_path.clone()),
+            true,
+            None,
+        );
+        let response = restore_settings_recovery_backup_with(
+            &preview.source_hash,
+            &app_state,
+            &config_dir,
+        )
+        .unwrap();
+
+        assert_eq!(response.settings.mkvmerge_path, "/restored/tools/mkvmerge");
+        assert_eq!(response.settings.min_extra_duration, 240);
+        assert_eq!(
+            response.settings.unrecognized["future_preference"],
+            newer_setting
+        );
+        let warning = response.recovery_warning.as_deref().unwrap();
+        assert!(warning.contains("newer version of BDMV Remuxer"));
+        assert!(warning.contains("future_preference"));
+        assert!(warning.contains("Update BDMV Remuxer"));
+        assert!(warning.contains("preserve them"));
+        assert_eq!(
+            app_state
+                .lock()
+                .settings_recovery_warning()
+                .map(str::to_string)
+                .as_deref(),
+            Some(warning)
+        );
+
+        let settings_path = config_dir.join("settings.json");
+        let saved_json: Value = serde_json::from_slice(&fs::read(&settings_path).unwrap()).unwrap();
+        assert_eq!(saved_json["future_preference"], newer_setting);
+
+        let mut edited_settings = response.settings;
+        edited_settings.mkvmerge_path = "/edited/tools/mkvmerge".into();
+        let saved_settings = edited_settings.save_to_config_dir(&config_dir).unwrap();
+        let edited_json: Value =
+            serde_json::from_slice(&fs::read(&settings_path).unwrap()).unwrap();
+        assert_eq!(saved_settings.mkvmerge_path, "/edited/tools/mkvmerge");
+        assert_eq!(edited_json["future_preference"], newer_setting);
+        assert!(saved_settings
+            .unrecognized_fields_warning()
+            .unwrap()
+            .contains("future_preference"));
+
+        let _ = fs::remove_dir_all(config_dir);
     }
 }
 
