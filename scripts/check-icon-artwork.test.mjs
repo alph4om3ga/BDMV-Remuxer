@@ -46,6 +46,27 @@ test("the check rejects a missing play triangle at 48px and 64px", async () => {
   });
 });
 
+test("the check rejects a low-contrast play triangle at 16px and 32px", async () => {
+  const mutedTriangle = originalSvg.replace(
+    'fill="#ddfaff"',
+    'fill="#294057"',
+  );
+  assert.notEqual(mutedTriangle, originalSvg, "the play path should be found");
+  const variantPath = await writeVariant("low-contrast-play.svg", mutedTriangle);
+
+  await assert.rejects(assertIconArtwork(variantPath), (error) => {
+    assert.match(
+      error.message,
+      /16px play triangle has only \d+ clearly separated pixel\(s\); expected at least 2/,
+    );
+    assert.match(
+      error.message,
+      /32px play triangle has only \d+ clearly separated pixel\(s\); expected at least 2/,
+    );
+    return true;
+  });
+});
+
 test("the check rejects a missing disc arrow", async () => {
   const withoutArrow = originalSvg.replace(
     /<path\b(?=[^>]*\bd="M243 738)[^>]*\/>/,
@@ -55,6 +76,27 @@ test("the check rejects a missing disc arrow", async () => {
   const variantPath = await writeVariant("without-arrow.svg", withoutArrow);
 
   await assert.rejects(assertIconArtwork(variantPath), /rotating disc arrow/);
+});
+
+test("the check reports low contrast on a disc ring with its affected sizes", async () => {
+  const faintRing = originalSvg.replace(
+    'r="248" fill="none" stroke="#d7fbff" stroke-width="12" opacity="0.88"',
+    'r="248" fill="none" stroke="#d7fbff" stroke-width="12" opacity="0.3"',
+  );
+  assert.notEqual(faintRing, originalSvg, "the bright disc ring should be found");
+  const variantPath = await writeVariant("low-contrast-disc-ring.svg", faintRing);
+
+  await assert.rejects(assertIconArtwork(variantPath), (error) => {
+    assert.match(
+      error.message,
+      /48px bright disc ring contrast is [\d.]+; expected at least [\d.]+/,
+    );
+    assert.match(
+      error.message,
+      /64px bright disc ring contrast is [\d.]+; expected at least [\d.]+/,
+    );
+    return true;
+  });
 });
 
 test("the check rejects a flattened disc arrow at 48px and 64px", async () => {
