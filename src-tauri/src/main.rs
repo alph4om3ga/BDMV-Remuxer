@@ -7,7 +7,9 @@ mod state;
 mod tool_error;
 
 use crate::bdmv::{BdmvParser, MediaFile, Track, Volume};
-use crate::muxer::{remove_staged_output, MuxJob, MuxProgress, Muxer};
+use crate::muxer::{
+    promote_staged_output, remove_staged_output, staged_output_path, MuxJob, MuxProgress, Muxer,
+};
 use crate::state::{
     settings_directory_for_config_root, source_file_fingerprint, AppState, CompletedFile, Project,
     ProjectStatus, Settings, SettingsRecoveryPreview,
@@ -840,6 +842,7 @@ struct MuxerStatus {
 async fn remux_and_mark_file_completed<F, Fut>(
     project: &mut Project,
     source_path: &str,
+    output_path: &Path,
     remux: F,
 ) -> Result<String, String>
 where
@@ -851,22 +854,41 @@ where
         .await
         .map_err(|error| format!("Failed to verify source file before remux: {}", error))??;
 
-    remux().await?;
+    if let Err(error) = remux().await {
+        return Err(discard_staged_output_after_error(output_path, error));
+    }
 
     let path = source_path.to_string();
     let fingerprint_after_remux =
-        tokio::task::spawn_blocking(move || source_file_fingerprint(&path))
-            .await
-            .map_err(|error| format!("Failed to verify source file after remux: {}", error))??;
+        match tokio::task::spawn_blocking(move || source_file_fingerprint(&path)).await {
+            Ok(Ok(fingerprint)) => fingerprint,
+            Ok(Err(error)) => {
+                let error = format!("Failed to verify source file after remux: {}", error);
+                return Err(discard_staged_output_after_error(output_path, error));
+            }
+            Err(error) => {
+                let error = format!("Failed to verify source file after remux: {}", error);
+                return Err(discard_staged_output_after_error(output_path, error));
+            }
+        };
     if fingerprint_after_remux != source_fingerprint {
-        return Err(format!(
+        let error = format!(
             "Source file changed during remux; retry this file: {}",
             source_path
-        ));
+        );
+        return Err(discard_staged_output_after_error(output_path, error));
     }
 
+    promote_staged_output(&staged_output_path(output_path), output_path).await?;
     project.mark_file_completed(source_path, source_fingerprint.clone());
     Ok(source_fingerprint)
+}
+
+fn discard_staged_output_after_error(output_path: &Path, error: String) -> String {
+    match remove_staged_output(output_path) {
+        Ok(()) => error,
+        Err(cleanup_error) => format!("{}; {}", error, cleanup_error),
+    }
 }
 
 fn completion_resume_notices(
@@ -1123,9 +1145,16 @@ async fn run_mux_queue(window: Window, state: AppStateType, muxer_state: Arc<Mut
                     };
 
                     let muxer_path = settings.mkvmerge_path.clone();
-                    match remux_and_mark_file_completed(&mut project, &file.path, || async {
-                        Muxer::run_mkvmerge(&muxer_path, &job).await
-                    })
+                    match remux_and_mark_file_completed(
+                        &mut project,
+                        &file.path,
+                        &output_path,
+                        || async {
+                            Muxer::run_mkvmerge_staged(&muxer_path, &job)
+                                .await
+                                .map(|_| ())
+                        },
+                    )
                     .await
                     {
                         Ok(source_fingerprint) => {
@@ -2631,10 +2660,12 @@ mod project_removal_tests {
 #[cfg(test)]
 mod remux_source_change_tests {
     use super::remux_and_mark_file_completed;
+    use crate::muxer::staged_output_path;
     use crate::state::{Project, ProjectStatus};
     use chrono::Utc;
     use std::collections::HashMap;
     use std::fs;
+    use std::path::PathBuf;
     use uuid::Uuid;
 
     #[tokio::test]
@@ -2660,16 +2691,38 @@ mod remux_source_change_tests {
             error: None,
         };
 
-        let result = remux_and_mark_file_completed(&mut project, &source_path, || async {
-            tokio::fs::write(&source_path, b"changed during remux")
-                .await
-                .map_err(|error| error.to_string())
-        })
-        .await;
+        let output_path = PathBuf::from(&project.output_path).join("questionable.mkv");
+        let staged_path = staged_output_path(&output_path);
+        fs::write(&output_path, b"previous valid output").unwrap();
+
+        let result =
+            remux_and_mark_file_completed(&mut project, &source_path, &output_path, || async {
+                tokio::fs::write(&staged_path, b"questionable output")
+                    .await
+                    .map_err(|error| error.to_string())?;
+                tokio::fs::write(&source_path, b"changed during remux")
+                    .await
+                    .map_err(|error| error.to_string())
+            })
+            .await;
 
         let error = result.expect_err("changed source must fail verification");
         assert!(error.contains("changed during remux"));
         assert!(!project.is_file_completed(&source_path));
+        assert_eq!(fs::read(&output_path).unwrap(), b"previous valid output");
+        assert!(!staged_path.exists());
+
+        remux_and_mark_file_completed(&mut project, &source_path, &output_path, || async {
+            tokio::fs::write(&staged_path, b"clean retry output")
+                .await
+                .map_err(|error| error.to_string())
+        })
+        .await
+        .unwrap();
+
+        assert!(project.is_file_completed(&source_path));
+        assert_eq!(fs::read(&output_path).unwrap(), b"clean retry output");
+        assert!(!staged_path.exists());
         fs::remove_dir_all(directory).unwrap();
     }
 }

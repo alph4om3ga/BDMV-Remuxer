@@ -50,6 +50,15 @@ pub struct MuxProgress {
 impl Muxer {
     /// Run mkvmerge for a single job, applying track language/name edits.
     pub async fn run_mkvmerge(mkvmerge_path: &str, job: &MuxJob) -> Result<(), String> {
+        let staged_path = Self::run_mkvmerge_staged(mkvmerge_path, job).await?;
+        promote_staged_output(&staged_path, Path::new(&job.output_path)).await
+    }
+
+    /// Run mkvmerge but leave its output staged until the caller verifies it.
+    pub(crate) async fn run_mkvmerge_staged(
+        mkvmerge_path: &str,
+        job: &MuxJob,
+    ) -> Result<PathBuf, String> {
         let final_output_path = Path::new(&job.output_path);
         let staged_output_path = staged_output_path(final_output_path);
         if tokio::fs::try_exists(&staged_output_path)
@@ -187,7 +196,7 @@ impl Muxer {
 
         if status.success() || status.code() == Some(1) {
             // mkvmerge returns 1 for warnings, which is still a success.
-            promote_staged_output(&staged_output_path, final_output_path).await
+            Ok(staged_output_path)
         } else {
             let _ = tokio::fs::remove_file(&staged_output_path).await;
             let diagnostics = stderr.trim();
@@ -231,7 +240,10 @@ pub(crate) fn remove_staged_output(output_path: &Path) -> Result<(), String> {
     }
 }
 
-async fn promote_staged_output(staged_path: &Path, output_path: &Path) -> Result<(), String> {
+pub(crate) async fn promote_staged_output(
+    staged_path: &Path,
+    output_path: &Path,
+) -> Result<(), String> {
     #[cfg(windows)]
     if tokio::fs::try_exists(output_path).await.unwrap_or(false) {
         tokio::fs::remove_file(output_path).await.map_err(|error| {
