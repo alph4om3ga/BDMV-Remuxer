@@ -446,8 +446,25 @@ jobs:
             exit 1
           fi
           if ! grep -Fq "main interface heading" <<< "$failure_output" ||
-             ! grep -Fq "The webview may be blank or failed to load." <<< "$failure_output"; then
+             ! grep -Fq "The webview may be blank, may have failed to load" <<< "$failure_output"; then
             echo "The missing-heading check did not report the blank-interface diagnostic." >&2
+            echo "$failure_output" >&2
+            exit 1
+          fi
+
+          set +e
+          failure_output="$("$checker" --test-accessibility-failure 2>&1)"
+          checker_status=$?
+          set -e
+          if [ "$checker_status" -ne 4 ]; then
+            echo "The accessibility-failure check exited with $checker_status instead of 4." >&2
+            echo "$failure_output" >&2
+            exit 1
+          fi
+          if ! grep -Fq "macOS accessibility inspection failed" <<< "$failure_output" ||
+             ! grep -Fq "AX error -25211" <<< "$failure_output" ||
+             grep -Fq "webview may be blank" <<< "$failure_output"; then
+            echo "The accessibility-failure check did not report a platform inspection failure separately." >&2
             echo "$failure_output" >&2
             exit 1
           fi
@@ -470,6 +487,7 @@ jobs:
             case "$checker_status" in
               2) echo "The app exited or did not start from the mounted DMG." >&2 ;;
               3) echo "The app opened a visible window, but its main interface did not render within 60 seconds." >&2 ;;
+              4) echo "macOS accessibility inspection failed; interface rendering could not be determined." >&2 ;;
               *) echo "The app remained open but did not create a visible main window within 60 seconds." >&2 ;;
             esac
             exit 1
@@ -483,6 +501,8 @@ jobs:
           if [ "$checker_status" -ne 0 ]; then
             if [ "$checker_status" -eq 3 ]; then
               echo "The app's main interface was no longer accessible after startup." >&2
+            elif [ "$checker_status" -eq 4 ]; then
+              echo "macOS accessibility inspection failed after startup; interface rendering could not be determined." >&2
             else
               echo "The app did not keep its main window open after startup." >&2
             fi
