@@ -11,4 +11,4 @@ Nested Weston Wayland produced a negative WebKit viewport for this app, and its 
 
 **Why:** the system's default EGL driver is newer than the packaged WebKit runtime, and merely having a virtual display does not ensure the app is rendered correctly.
 
-**How to apply:** when validating an installed UI, select the compatible Mesa 25 manifest and software driver explicitly, then confirm the actual screenshot and app viewport before relying on the display setup.
+**How to apply:** when validating an installed UI, select the compatible Mesa 25 manifest and software driver explicitly, then confirm the actual screenshot and app viewport before relying on the display setup. Native GTK folder dialogs also require `GSETTINGS_SCHEMA_DIR` to point at the installed GTK 3 package's compiled schemas, plus `GSETTINGS_BACKEND=memory`; otherwise opening the picker aborts with a missing `org.gtk.Settings.FileChooser` schema error. Resolve the schema directory from the current Nix store rather than hardcoding its path.

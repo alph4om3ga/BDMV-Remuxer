@@ -1515,6 +1515,16 @@ fn main() {
         std::process::exit(if result.is_ok() { 0 } else { 1 });
     }
 
+    let probe_smoke = if args.get(1).map(String::as_str) == Some("--smoke-probe") {
+        if args.len() != 4 {
+            eprintln!("Usage: bdmv-remuxer --smoke-probe <volume-folder> <report.log>");
+            std::process::exit(2);
+        }
+        Some((PathBuf::from(&args[2]), PathBuf::from(&args[3])))
+    } else {
+        None
+    };
+
     let recovery_smoke = if args.get(1).map(String::as_str) == Some("--smoke-settings-recovery") {
         if args.len() != 4 {
             eprintln!(
@@ -1545,6 +1555,43 @@ fn main() {
         if let Err(error) = restored_state.restore_workspace(&config_dir) {
             eprintln!("{}", error);
             restored_state.set_persistence_error(error, &config_dir);
+        }
+    }
+    if let Some((volume_path, report_path)) = probe_smoke {
+        match run_probe_smoke(&volume_path, &restored_state.settings.ffprobe_path) {
+            Ok((volume, report)) => {
+                restored_state.current_volumes.clear();
+                restored_state.current_volumes.push(volume);
+                if let Err(error) = restored_state.persist_workspace() {
+                    let report = format!("Installed app probe smoke failed: {}\n", error);
+                    let _ = std::fs::write(&report_path, &report);
+                    eprint!("{}", report);
+                    std::process::exit(1);
+                }
+                if let Err(error) = std::fs::write(&report_path, &report) {
+                    eprintln!(
+                        "Could not write probe smoke report to {}: {}\n{}",
+                        report_path.display(),
+                        error,
+                        report
+                    );
+                    std::process::exit(2);
+                }
+                eprint!("{}", report);
+            }
+            Err(error) => {
+                let report = format!("Installed app probe smoke failed: {}\n", error);
+                if let Err(write_error) = std::fs::write(&report_path, &report) {
+                    eprintln!(
+                        "Could not write probe smoke report to {}: {}\n{}",
+                        report_path.display(),
+                        write_error,
+                        report
+                    );
+                }
+                eprint!("{}", report);
+                std::process::exit(1);
+            }
         }
     }
     let app_state: AppStateType = Arc::new(Mutex::new(restored_state));
@@ -1732,6 +1779,34 @@ fn run_remux_smoke(args: &[String]) -> Result<String, String> {
         args[4],
         output.len()
     ))
+}
+
+fn run_probe_smoke(volume_path: &Path, ffprobe_path: &str) -> Result<(Volume, String), String> {
+    let volume_path_string = volume_path.to_string_lossy().into_owned();
+    let parser = BdmvParser::with_ffprobe(ffprobe_path);
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|error| format!("Could not start FFprobe smoke runtime: {}", error))?;
+    let volume = runtime
+        .block_on(parser.parse_volume(&volume_path_string))
+        .map_err(|error| error.to_string())?;
+
+    if volume.files.len() != 1 || volume.probe_failures.len() != 1 {
+        return Err(format!(
+            "Expected one readable source and one skipped source, but found {} readable and {} skipped.",
+            volume.files.len(),
+            volume.probe_failures.len()
+        ));
+    }
+
+    let readable_path = &volume.files[0].path;
+    let failure = &volume.probe_failures[0];
+    let report = format!(
+        "Installed app probe smoke passed.\nVolume: {}\nReadable source: {}\nSkipped source: {}\nFFprobe diagnostic: {}\n",
+        volume.name, readable_path, failure.path, failure.diagnostic
+    );
+    Ok((volume, report))
 }
 
 #[cfg(test)]
