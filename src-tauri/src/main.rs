@@ -1549,6 +1549,28 @@ fn main() {
         std::process::exit(if result.is_ok() { 0 } else { 1 });
     }
 
+    if args.get(1).map(String::as_str) == Some("--smoke-settings-upgrade") {
+        if args.len() != 4 {
+            eprintln!("Usage: bdmv-remuxer --smoke-settings-upgrade <seed|verify> <report.log>");
+            std::process::exit(2);
+        }
+
+        let result = run_settings_upgrade_smoke(&args[2]);
+        let report = match &result {
+            Ok(report) => report.clone(),
+            Err(error) => format!("Installed app settings upgrade smoke failed: {}\n", error),
+        };
+        if let Err(error) = std::fs::write(&args[3], &report) {
+            eprintln!(
+                "Could not write settings upgrade smoke report to {}: {}\n{}",
+                args[3], error, report
+            );
+            std::process::exit(2);
+        }
+        eprint!("{}", report);
+        std::process::exit(if result.is_ok() { 0 } else { 1 });
+    }
+
     let probe_smoke = if args.get(1).map(String::as_str) == Some("--smoke-probe") {
         if args.len() != 4 {
             eprintln!("Usage: bdmv-remuxer --smoke-probe <volume-folder> <report.log>");
@@ -2583,6 +2605,63 @@ fn settings_config_dir() -> Result<PathBuf, String> {
     tauri::api::path::config_dir()
         .map(|path| settings_directory_for_config_root(&path))
         .ok_or_else(|| "could not determine the platform config directory".into())
+}
+
+fn run_settings_upgrade_smoke(mode: &str) -> Result<String, String> {
+    let config_dir = settings_config_dir()?;
+    let mut expected = Settings::default();
+    expected.mkvmerge_path = r"C:\BDMV Remuxer Upgrade Smoke\tools\mkvmerge.exe".into();
+    expected.ffprobe_path = r"C:\BDMV Remuxer Upgrade Smoke\tools\ffprobe.exe".into();
+    expected.min_episode_duration = 1845;
+    expected.min_extra_duration = 147;
+    expected.op_ed_min_duration = 83;
+    expected.op_ed_max_duration = 117;
+    expected.episode_folder_name = "Upgrade Episodes".into();
+    expected.extra_folder_name = "Upgrade Specials".into();
+
+    match mode {
+        "seed" => {
+            let saved = expected.save_to_config_dir(&config_dir)?;
+            Ok(format!(
+                "Saved non-default preferences for installer upgrade verification in {}:\n{}",
+                config_dir.display(),
+                serde_json::to_string_pretty(&saved)
+                    .map_err(|error| format!("Could not serialize saved preferences: {}", error))?
+            ))
+        }
+        "verify" => {
+            let outcome = Settings::load_with_recovery(&config_dir);
+            if let Some(warning) = outcome.recovery_warning {
+                return Err(format!(
+                    "Preferences did not load cleanly after upgrade: {}",
+                    warning
+                ));
+            }
+            if !outcome.can_save {
+                return Err("Preferences loaded in recovery-only mode after upgrade.".into());
+            }
+
+            let actual = serde_json::to_value(&outcome.settings)
+                .map_err(|error| format!("Could not serialize loaded preferences: {}", error))?;
+            let expected = serde_json::to_value(&expected)
+                .map_err(|error| format!("Could not serialize expected preferences: {}", error))?;
+            if actual != expected {
+                return Err(format!(
+                    "Loaded preferences do not match the saved values.\nExpected: {}\nActual: {}",
+                    expected, actual
+                ));
+            }
+            Ok(format!(
+                "Verified that the upgraded app loaded all saved preferences from {}:\n{}",
+                config_dir.display(),
+                actual
+            ))
+        }
+        _ => Err(format!(
+            "Unknown settings upgrade smoke mode '{}'; expected 'seed' or 'verify'.",
+            mode
+        )),
+    }
 }
 
 #[cfg(all(test, unix))]

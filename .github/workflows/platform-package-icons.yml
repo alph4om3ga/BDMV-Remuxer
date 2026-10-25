@@ -76,8 +76,81 @@ jobs:
       - run: node scripts/verify-platform-icons.mjs
       - name: Test settings replacement and Rust suite on Windows
         run: cargo test --manifest-path src-tauri/Cargo.toml --no-default-features
-      - name: Build Windows installer
+      - name: Build pre-upgrade Windows installer
+        run: npm run tauri -- build --bundles msi --config '{"package":{"version":"0.9.0"}}' --ci
+      - name: Preserve pre-upgrade MSI for upgrade verification
+        shell: pwsh
+        run: |
+          $msi = Get-ChildItem "src-tauri/target/release/bundle/msi" -Filter "*.msi" -File |
+            Select-Object -First 1
+          if (-not $msi) { throw "Tauri did not produce the pre-upgrade Windows MSI." }
+          Copy-Item -LiteralPath $msi.FullName -Destination (Join-Path $env:RUNNER_TEMP "bdmv-remuxer-0.9.0.msi")
+          Remove-Item "src-tauri/target/release/bundle/msi/*.msi" -Force
+      - name: Build current Windows installer
         run: npm run tauri -- build --bundles msi --ci
+      - name: Upgrade the installed app and verify saved preferences
+        shell: pwsh
+        run: |
+          $oldMsi = Join-Path $env:RUNNER_TEMP "bdmv-remuxer-0.9.0.msi"
+          $currentMsi = Get-ChildItem "src-tauri/target/release/bundle/msi" -Filter "*.msi" -File |
+            Select-Object -First 1
+          if (-not (Test-Path $oldMsi)) { throw "The pre-upgrade MSI is missing: $oldMsi" }
+          if (-not $currentMsi) { throw "Tauri did not produce the current Windows MSI." }
+
+          $installDir = Join-Path $env:RUNNER_TEMP "bdmv remuxer installed"
+          $oldInstall = Start-Process -FilePath "msiexec.exe" `
+            -ArgumentList "/i `"$oldMsi`" /qn /norestart INSTALLDIR=`"$installDir`"" `
+            -Wait -PassThru
+          if ($oldInstall.ExitCode -notin @(0, 3010)) {
+            throw "Pre-upgrade MSI installation failed with exit code $($oldInstall.ExitCode)."
+          }
+
+          $exe = Join-Path $installDir "bdmv-remuxer.exe"
+          if (-not (Test-Path $exe)) {
+            throw "The pre-upgrade MSI did not install the application at $exe."
+          }
+
+          $seedReport = Join-Path $env:RUNNER_TEMP "bdmv-remuxer-settings-seed.log"
+          Remove-Item $seedReport -Force -ErrorAction SilentlyContinue
+          & $exe --smoke-settings-upgrade seed $seedReport
+          if ($LASTEXITCODE -ne 0 -or -not (Test-Path $seedReport)) {
+            if (Test-Path $seedReport) { Get-Content -LiteralPath $seedReport | Write-Host }
+            throw "The older installed app could not save the non-default preferences."
+          }
+          Get-Content -LiteralPath $seedReport | Write-Host
+
+          $upgrade = Start-Process -FilePath "msiexec.exe" `
+            -ArgumentList "/i `"$($currentMsi.FullName)`" /qn /norestart INSTALLDIR=`"$installDir`"" `
+            -Wait -PassThru
+          if ($upgrade.ExitCode -notin @(0, 3010)) {
+            throw "Upgrading to the current MSI failed with exit code $($upgrade.ExitCode)."
+          }
+          if (-not (Test-Path $exe)) {
+            throw "The upgraded MSI did not leave the application at $exe."
+          }
+
+          $verifyReport = Join-Path $env:RUNNER_TEMP "bdmv-remuxer-settings-verify.log"
+          Remove-Item $verifyReport -Force -ErrorAction SilentlyContinue
+          & $exe --smoke-settings-upgrade verify $verifyReport
+          if ($LASTEXITCODE -ne 0 -or -not (Test-Path $verifyReport)) {
+            if (Test-Path $verifyReport) { Get-Content -LiteralPath $verifyReport | Write-Host }
+            throw "The upgraded app did not reload all saved preferences."
+          }
+          $report = Get-Content -LiteralPath $verifyReport -Raw
+          Write-Host $report
+          foreach ($expected in @(
+            "Upgrade Episodes",
+            "Upgrade Specials",
+            "1845",
+            "147",
+            "83",
+            "117"
+          )) {
+            if ($report -notlike "*$expected*") {
+              throw "The upgraded app's loaded-preferences report did not include '$expected'."
+            }
+          }
+          Write-Host "Verified that a real MSI upgrade preserves and reloads all non-default preferences."
       - name: Verify blank-interface smoke check rejects a missing heading
         shell: pwsh
         run: |
@@ -108,22 +181,11 @@ jobs:
             throw "The executable icon is too small: $($icon.Width)x$($icon.Height)."
           }
           Write-Host "Verified $($msi.Count) MSI package(s) and executable icon: $($icon.Width)x$($icon.Height)."
-      - name: Install MSI and verify the app renders its main interface
+      - name: Verify the upgraded app renders its main interface
         shell: pwsh
         run: |
           . "$env:GITHUB_WORKSPACE\scripts\smoke-windows-interface.ps1"
-          $msi = Get-ChildItem "src-tauri/target/release/bundle/msi" -Filter "*.msi" -File |
-            Select-Object -First 1
-          if (-not $msi) { throw "No Windows MSI is available to install." }
-
           $installDir = Join-Path $env:RUNNER_TEMP "bdmv remuxer installed"
-          $install = Start-Process -FilePath "msiexec.exe" `
-            -ArgumentList "/i `"$($msi.FullName)`" /qn /norestart INSTALLDIR=`"$installDir`"" `
-            -Wait -PassThru
-          if ($install.ExitCode -notin @(0, 3010)) {
-            throw "MSI installation failed with exit code $($install.ExitCode)."
-          }
-
           $exe = Join-Path $installDir "bdmv-remuxer.exe"
           if (-not (Test-Path $exe)) {
             throw "The MSI completed but did not install the application at $exe."
