@@ -60,12 +60,14 @@ interface AppStore {
   outputName: string;
   outputPath: string;
   retryingProbeFailures: Record<string, boolean>;
+  retryingProbeBatches: Record<string, boolean>;
   retryingProjects: Record<string, boolean>;
 
   // Actions
   loadBdmv: () => Promise<void>;
   loadMultipleBdmvs: () => Promise<void>;
   retryProbeFailure: (volumeId: string, path: string) => Promise<void>;
+  retryAllProbeFailures: (volumeId: string) => Promise<void>;
   clearVolumes: () => Promise<void>;
   selectFile: (fileId: string) => void;
   toggleVolumeExpanded: (volumeId: string) => void;
@@ -120,6 +122,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
   outputName: '',
   outputPath: '',
   retryingProbeFailures: {},
+  retryingProbeBatches: {},
   retryingProjects: {},
 
   loadBdmv: async () => {
@@ -205,6 +208,71 @@ export const useAppStore = create<AppStore>((set, get) => ({
         const retryingProbeFailures = { ...state.retryingProbeFailures };
         delete retryingProbeFailures[retryKey];
         return { retryingProbeFailures };
+      });
+    }
+  },
+
+  retryAllProbeFailures: async (volumeId) => {
+    const volume = get().volumes.find(item => item.id === volumeId);
+    if (!volume || volume.probe_failures.length === 0) return;
+    if (Object.keys(get().retryingProbeFailures).some(key => key.startsWith(`${volumeId}:`))) return;
+
+    const paths = volume.probe_failures.map(failure => failure.path);
+    const retryKeys = paths.map(path => `${volumeId}:${path}`);
+    set(state => ({
+      retryingProbeBatches: { ...state.retryingProbeBatches, [volumeId]: true },
+      retryingProbeFailures: {
+        ...state.retryingProbeFailures,
+        ...Object.fromEntries(retryKeys.map(key => [key, true])),
+      },
+    }));
+
+    try {
+      const results = await invoke<Array<{
+        volume_id: string;
+        path: string;
+        file: Volume['files'][number] | null;
+        failure: Volume['probe_failures'][number] | null;
+      }>>('retry_all_probe_failures', { volumeId });
+
+      set(state => ({
+        volumes: state.volumes.map(currentVolume => {
+          if (currentVolume.id !== volumeId) return currentVolume;
+          let files = currentVolume.files;
+          let probeFailures = currentVolume.probe_failures;
+
+          for (const result of results) {
+            if (result.file && !files.some(file => file.path === result.path)) {
+              files = [...files, result.file];
+            }
+            if (result.file) {
+              probeFailures = probeFailures.filter(failure => failure.path !== result.path);
+            } else if (result.failure) {
+              probeFailures = probeFailures.map(failure =>
+                failure.path === result.path ? result.failure! : failure
+              );
+            }
+          }
+
+          return { ...currentVolume, files, probe_failures: probeFailures };
+        }),
+      }));
+    } catch (e) {
+      let error = String(e);
+      try {
+        const currentVolumes = await invoke<Volume[]>('get_current_volumes');
+        set({ volumes: currentVolumes });
+      } catch (refreshError) {
+        error += `; also failed to refresh source files: ${String(refreshError)}`;
+      }
+      set({ error });
+    } finally {
+      set(state => {
+        const retryingProbeFailures = { ...state.retryingProbeFailures };
+        for (const key of retryKeys) delete retryingProbeFailures[key];
+        const retryingProbeBatches = { ...state.retryingProbeBatches };
+        delete retryingProbeBatches[volumeId];
+        return { retryingProbeFailures, retryingProbeBatches };
       });
     }
   },

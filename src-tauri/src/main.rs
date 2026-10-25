@@ -61,6 +61,42 @@ struct ProbeRetryResult {
     failure: Option<crate::bdmv::ProbeFailure>,
 }
 
+fn merge_probe_retry_results(
+    volume: &mut Volume,
+    results: &[ProbeRetryResult],
+) -> Result<(), String> {
+    for result in results {
+        let is_still_skipped = volume
+            .probe_failures
+            .iter()
+            .any(|failure| failure.path == result.path);
+        let is_already_loaded = volume.files.iter().any(|file| file.path == result.path);
+        if !is_still_skipped && !is_already_loaded {
+            return Err("Skipped source file not found".into());
+        }
+    }
+
+    for result in results {
+        if !volume
+            .probe_failures
+            .iter()
+            .any(|failure| failure.path == result.path)
+        {
+            // Another retry may already have recovered this file.
+            continue;
+        }
+
+        let probe_result = match (&result.file, &result.failure) {
+            (Some(file), _) => Ok(file.clone()),
+            (None, Some(failure)) => Err(failure.diagnostic.clone()),
+            (None, None) => return Err("Probe retry returned no result".into()),
+        };
+        apply_probe_retry_result(volume, &result.path, probe_result)?;
+    }
+
+    Ok(())
+}
+
 fn apply_probe_retry_result(
     volume: &mut Volume,
     path: &str,
@@ -156,9 +192,72 @@ async fn retry_probe_failure(
     Ok(result)
 }
 
+#[tauri::command]
+async fn retry_all_probe_failures(
+    volume_id: String,
+    state: State<'_, AppStateType>,
+) -> Result<Vec<ProbeRetryResult>, String> {
+    let (ffprobe_path, mut working_volume, volume_path) = {
+        let app_state = state.lock();
+        let volume = app_state
+            .current_volumes
+            .iter()
+            .find(|volume| volume.id == volume_id)
+            .ok_or_else(|| "Volume not found".to_string())?;
+        let first_failure = volume
+            .probe_failures
+            .first()
+            .ok_or_else(|| "No skipped source files to retry".to_string())?;
+        let volume_path = Path::new(&first_failure.path)
+            .parent()
+            .and_then(Path::parent)
+            .and_then(Path::parent)
+            .ok_or_else(|| "Could not determine the BDMV folder for this source file".to_string())?
+            .to_string_lossy()
+            .to_string();
+        (
+            app_state.settings.ffprobe_path.clone(),
+            volume.clone(),
+            volume_path,
+        )
+    };
+
+    let parser = BdmvParser::with_ffprobe(ffprobe_path);
+    let paths: Vec<String> = working_volume
+        .probe_failures
+        .iter()
+        .map(|failure| failure.path.clone())
+        .collect();
+    let mut results = Vec::with_capacity(paths.len());
+
+    for path in paths {
+        let probe_result = parser
+            .retry_file(&path, &working_volume.files, &volume_path)
+            .await
+            .map_err(|error| error.to_string());
+        results.push(apply_probe_retry_result(
+            &mut working_volume,
+            &path,
+            probe_result,
+        )?);
+    }
+
+    let mut app_state = state.lock();
+    let volume = app_state
+        .current_volumes
+        .iter_mut()
+        .find(|volume| volume.id == volume_id)
+        .ok_or_else(|| "Volume not found".to_string())?;
+    merge_probe_retry_results(volume, &results)?;
+    app_state.persist_workspace()?;
+    Ok(results)
+}
+
 #[cfg(test)]
 mod probe_retry_tests {
-    use super::{apply_probe_retry_result, MediaFile, Volume};
+    use super::{
+        apply_probe_retry_result, merge_probe_retry_results, MediaFile, ProbeRetryResult, Volume,
+    };
     use crate::bdmv::ProbeFailure;
 
     fn sample_file(id: &str, path: &str) -> MediaFile {
@@ -234,6 +333,81 @@ mod probe_retry_tests {
         assert_eq!(volume.files[1].id, "retried-file");
         assert!(volume.probe_failures.is_empty());
         assert_eq!(result.file.unwrap().id, retried_file.id);
+    }
+
+    #[test]
+    fn batch_retry_keeps_existing_edits_order_and_latest_failures() {
+        let mut volume = volume();
+        volume.probe_failures.push(ProbeFailure {
+            path: "/disc/BDMV/STREAM/00003.m2ts".into(),
+            diagnostic: "second diagnostic".into(),
+        });
+        let mut working_volume = volume.clone();
+        let first_result = apply_probe_retry_result(
+            &mut working_volume,
+            "/disc/BDMV/STREAM/00002.m2ts",
+            Ok(sample_file(
+                "retried-first",
+                "/disc/BDMV/STREAM/00002.m2ts",
+            )),
+        )
+        .unwrap();
+        let second_result = apply_probe_retry_result(
+            &mut working_volume,
+            "/disc/BDMV/STREAM/00003.m2ts",
+            Err("latest second diagnostic".into()),
+        )
+        .unwrap();
+
+        volume.files[0].category = "CUSTOM".into();
+        volume.files[0].episode_number = Some(42);
+        volume.files[0].tracks.push(crate::bdmv::Track {
+            id: 1,
+            track_type: "audio".into(),
+            codec: "aac".into(),
+            language: "eng".into(),
+            name: "Edited track".into(),
+            default: true,
+            forced: false,
+            resolution: None,
+            channels: None,
+        });
+
+        merge_probe_retry_results(&mut volume, &[first_result, second_result]).unwrap();
+
+        assert_eq!(volume.files.len(), 2);
+        assert_eq!(volume.files[0].id, "loaded-file");
+        assert_eq!(volume.files[0].category, "CUSTOM");
+        assert_eq!(volume.files[0].episode_number, Some(42));
+        assert_eq!(volume.files[0].tracks[0].name, "Edited track");
+        assert_eq!(volume.files[1].id, "retried-first");
+        assert_eq!(volume.probe_failures.len(), 1);
+        assert_eq!(
+            volume.probe_failures[0].diagnostic,
+            "latest second diagnostic"
+        );
+    }
+
+    #[test]
+    fn batch_retry_does_not_add_a_file_that_was_already_recovered() {
+        let mut volume = volume();
+        let result = ProbeRetryResult {
+            volume_id: volume.id.clone(),
+            path: "/disc/BDMV/STREAM/00002.m2ts".into(),
+            file: Some(sample_file(
+                "retried-file",
+                "/disc/BDMV/STREAM/00002.m2ts",
+            )),
+            failure: None,
+        };
+        volume.files.push(result.file.clone().unwrap());
+        volume.probe_failures.clear();
+
+        merge_probe_retry_results(&mut volume, &[result]).unwrap();
+
+        assert_eq!(volume.files.len(), 2);
+        assert_eq!(volume.files[1].id, "retried-file");
+        assert!(volume.probe_failures.is_empty());
     }
 }
 
@@ -1775,6 +1949,7 @@ fn main() {
             // BDMV Loading
             load_bdmv,
             retry_probe_failure,
+            retry_all_probe_failures,
             load_multiple_bdmvs,
             scan_for_volumes,
             // File Classification

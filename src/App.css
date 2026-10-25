@@ -550,19 +550,29 @@ input:focus, select:focus {
   border-bottom: 1px solid var(--border);
 }
 
+.probe-failures-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
 .probe-failures h4 {
   display: flex;
   align-items: center;
   gap: 8px;
-  margin: 0 0 8px;
+  margin: 0;
   font-size: 13px;
 }
+
+.probe-failure-retry-all { flex-shrink: 0; margin-top: 0; }
 
 .probe-failures ul {
   display: flex;
   flex-direction: column;
   gap: 10px;
-  margin: 0;
+  margin-top: 8px;
+  margin-bottom: 0;
   padding-left: 24px;
 }
 

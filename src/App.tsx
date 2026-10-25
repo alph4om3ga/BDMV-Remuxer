@@ -103,7 +103,12 @@ interface VolumeCardProps {
 const VolumeCard: React.FC<VolumeCardProps> = ({ 
   volume, isExpanded, onToggle, selectedFileId, onFileSelect, onEditFile 
 }) => {
-  const { retryProbeFailure, retryingProbeFailures } = useAppStore();
+  const {
+    retryProbeFailure,
+    retryAllProbeFailures,
+    retryingProbeFailures,
+    retryingProbeBatches,
+  } = useAppStore();
   const isRetryingInVolume = Object.keys(retryingProbeFailures)
     .some(key => key.startsWith(`${volume.id}:`));
   const categoryCounts = volume.files.reduce((acc, f) => {
@@ -145,10 +150,22 @@ const VolumeCard: React.FC<VolumeCardProps> = ({
         <div className="volume-files">
           {volume.probe_failures?.length > 0 && (
             <section className="probe-failures" aria-label="FFprobe failures">
-              <h4>
-                <AlertTriangle size={16} />
-                {volume.probe_failures.length} source {volume.probe_failures.length === 1 ? 'file was' : 'files were'} skipped
-              </h4>
+              <div className="probe-failures-header">
+                <h4>
+                  <AlertTriangle size={16} />
+                  {volume.probe_failures.length} source {volume.probe_failures.length === 1 ? 'file was' : 'files were'} skipped
+                </h4>
+                <button
+                  className="probe-failure-retry probe-failure-retry-all"
+                  type="button"
+                  disabled={isRetryingInVolume}
+                  aria-label={`Retry all ${volume.probe_failures.length} skipped source files for ${volume.name}`}
+                  onClick={() => retryAllProbeFailures(volume.id)}
+                >
+                  <RotateCw size={14} />
+                  {retryingProbeBatches[volume.id] ? 'Retrying all…' : 'Retry all'}
+                </button>
+              </div>
               <ul>
                 {volume.probe_failures.map((failure, index) => (
                   <li key={`${failure.path}-${index}`}>
