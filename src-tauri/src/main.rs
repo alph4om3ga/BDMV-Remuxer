@@ -259,6 +259,7 @@ mod probe_retry_tests {
         apply_probe_retry_result, merge_probe_retry_results, MediaFile, ProbeRetryResult, Volume,
     };
     use crate::bdmv::ProbeFailure;
+    use crate::state::AppState;
 
     fn sample_file(id: &str, path: &str) -> MediaFile {
         MediaFile {
@@ -408,6 +409,88 @@ mod probe_retry_tests {
         assert_eq!(volume.files.len(), 2);
         assert_eq!(volume.files[1].id, "retried-file");
         assert!(volume.probe_failures.is_empty());
+    }
+
+    #[test]
+    fn retried_files_edits_and_latest_diagnostics_survive_workspace_restore() {
+        let config_dir = std::env::temp_dir().join(format!(
+            "bdmv-retry-workspace-round-trip-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let mut volume = volume();
+        let existing_file = &mut volume.files[0];
+        existing_file.category = "CUSTOM".into();
+        existing_file.episode_number = Some(42);
+        existing_file.op_number = Some(5);
+        existing_file.ed_number = Some(6);
+        existing_file.special_number = Some(7);
+        existing_file.tracks.push(crate::bdmv::Track {
+            id: 1,
+            track_type: "audio".into(),
+            codec: "aac".into(),
+            language: "eng".into(),
+            name: "Edited track".into(),
+            default: true,
+            forced: false,
+            resolution: None,
+            channels: None,
+        });
+        volume.probe_failures.push(ProbeFailure {
+            path: "/disc/BDMV/STREAM/00003.m2ts".into(),
+            diagnostic: "old diagnostic".into(),
+        });
+
+        let mut retry_results_volume = volume.clone();
+        let recovered = apply_probe_retry_result(
+            &mut retry_results_volume,
+            "/disc/BDMV/STREAM/00002.m2ts",
+            Ok(sample_file("retried-file", "/disc/BDMV/STREAM/00002.m2ts")),
+        )
+        .unwrap();
+        let still_failing = apply_probe_retry_result(
+            &mut retry_results_volume,
+            "/disc/BDMV/STREAM/00003.m2ts",
+            Err("most recent diagnostic".into()),
+        )
+        .unwrap();
+        merge_probe_retry_results(&mut volume, &[recovered, still_failing]).unwrap();
+
+        let mut app_state = AppState::default();
+        app_state.restore_workspace(&config_dir).unwrap();
+        app_state.current_volumes = vec![volume];
+        app_state.persist_workspace().unwrap();
+
+        // A fresh AppState represents launching the app again and restoring its saved workspace.
+        let mut restarted_state = AppState::default();
+        restarted_state.restore_workspace(&config_dir).unwrap();
+
+        let restored_volume = &restarted_state.current_volumes[0];
+        assert_eq!(restored_volume.files.len(), 2);
+        let restored_existing = &restored_volume.files[0];
+        assert_eq!(restored_existing.id, "loaded-file");
+        assert_eq!(restored_existing.category, "CUSTOM");
+        assert_eq!(restored_existing.episode_number, Some(42));
+        assert_eq!(restored_existing.op_number, Some(5));
+        assert_eq!(restored_existing.ed_number, Some(6));
+        assert_eq!(restored_existing.special_number, Some(7));
+        assert_eq!(restored_existing.tracks[0].name, "Edited track");
+
+        assert_eq!(restored_volume.files[1].id, "retried-file");
+        assert_eq!(
+            restored_volume.files[1].path,
+            "/disc/BDMV/STREAM/00002.m2ts"
+        );
+        assert_eq!(restored_volume.probe_failures.len(), 1);
+        assert_eq!(
+            restored_volume.probe_failures[0].path,
+            "/disc/BDMV/STREAM/00003.m2ts"
+        );
+        assert_eq!(
+            restored_volume.probe_failures[0].diagnostic,
+            "most recent diagnostic"
+        );
+
+        std::fs::remove_dir_all(config_dir).unwrap();
     }
 }
 
