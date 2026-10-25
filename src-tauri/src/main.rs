@@ -25,6 +25,9 @@ use uuid::Uuid;
 // Type alias for our state
 type AppStateType = Arc<Mutex<AppState>>;
 
+struct CloseApprovalState(Arc<AtomicBool>);
+struct CloseRetryRequiredState(Arc<AtomicBool>);
+
 // ============================================================================
 // Commands - BDMV Loading
 // ============================================================================
@@ -539,22 +542,22 @@ async fn confirm_close(
     window: Window,
     state: State<'_, AppStateType>,
     muxer_state: State<'_, Arc<Mutex<Muxer>>>,
-    close_approval: State<'_, Arc<AtomicBool>>,
-    close_retry_required: State<'_, Arc<AtomicBool>>,
+    close_approval: State<'_, CloseApprovalState>,
+    close_retry_required: State<'_, CloseRetryRequiredState>,
 ) -> Result<(), String> {
     let wait_for_muxer = {
         // Keep the muxer lock while saving the paused queue so the worker cannot
         // start another file between the save and the shutdown request.
         let mut muxer = muxer_state.lock();
         let mut app_state = state.lock();
-        prepare_close_with_retry_state(&mut app_state, &mut muxer, close_retry_required.inner())?
+        prepare_close_with_retry_state(&mut app_state, &mut muxer, close_retry_required.0.as_ref())?
     };
 
     while wait_for_muxer && muxer_state.lock().is_running {
         tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
     }
 
-    close_approval.store(true, Ordering::SeqCst);
+    close_approval.0.store(true, Ordering::SeqCst);
     window
         .close()
         .map_err(|error| format!("Failed to close window: {}", error))
@@ -1369,8 +1372,8 @@ fn main() {
     tauri::Builder::default()
         .manage(app_state)
         .manage(muxer_state)
-        .manage(close_approval.clone())
-        .manage(close_retry_required.clone())
+        .manage(CloseApprovalState(close_approval.clone()))
+        .manage(CloseRetryRequiredState(close_retry_required.clone()))
         .setup(move |app| {
             if let Some(report_path) = recovery_smoke_report_path {
                 let result = (|| -> Result<String, String> {

@@ -1,1 +1,2 @@
 - [Rust test linker on Replit](rust-test-linker.md) — If tests fail at link time with `cannot find -lz`, expose Nix zlib through linker library paths.
+- [WebKit virtual displays](webkit-virtual-display.md) — Use Mesa 25 llvmpipe with software X11 flags; the default Mesa 26 EGL driver is incompatible with the packaged WebKit runtime.
