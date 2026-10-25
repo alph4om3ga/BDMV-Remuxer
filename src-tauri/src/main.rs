@@ -2109,3 +2109,76 @@ fn settings_config_dir() -> Result<PathBuf, String> {
         .map(|path| settings_directory_for_config_root(&path))
         .ok_or_else(|| "could not determine the platform config directory".into())
 }
+
+#[cfg(all(test, unix))]
+mod spaced_tool_paths_tests {
+    use crate::bdmv::BdmvParser;
+    use crate::muxer::{MuxJob, Muxer};
+    use crate::state::Settings;
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::PathBuf;
+    use uuid::Uuid;
+
+    #[tokio::test]
+    async fn saved_tool_paths_with_spaces_survive_restart_and_launch_both_tools() {
+        let directory =
+            std::env::temp_dir().join(format!("bdmv remuxer spaced tool paths {}", Uuid::new_v4()));
+        let tools_directory = directory.join("installed media tools");
+        let config_directory = directory.join("user preferences");
+        fs::create_dir_all(&tools_directory).unwrap();
+        fs::create_dir_all(&config_directory).unwrap();
+
+        let mkvmerge_path = tools_directory.join("mkvmerge app");
+        fs::write(
+            &mkvmerge_path,
+            "#!/bin/sh\nwhile [ \"$#\" -gt 0 ]; do\n  if [ \"$1\" = \"-o\" ]; then shift; out=\"$1\"; fi\n  shift\ndone\nprintf 'remuxed' > \"$out\"\n",
+        )
+        .unwrap();
+        fs::set_permissions(&mkvmerge_path, fs::Permissions::from_mode(0o755)).unwrap();
+
+        let ffprobe_path = tools_directory.join("ffprobe app");
+        fs::write(
+            &ffprobe_path,
+            "#!/bin/sh\nprintf '{\"streams\":[],\"format\":{\"duration\":\"15\",\"size\":\"7\"}}\\n'\n",
+        )
+        .unwrap();
+        fs::set_permissions(&ffprobe_path, fs::Permissions::from_mode(0o755)).unwrap();
+
+        let mut settings = Settings::default();
+        settings.mkvmerge_path = mkvmerge_path.to_string_lossy().into_owned();
+        settings.ffprobe_path = ffprobe_path.to_string_lossy().into_owned();
+        settings.save_to_config_dir(&config_directory).unwrap();
+
+        // Loading from disk models a new app process after the user has saved Settings.
+        let restarted_settings = Settings::load_with_recovery(&config_directory).settings;
+        assert_eq!(
+            restarted_settings.mkvmerge_path,
+            mkvmerge_path.to_string_lossy()
+        );
+        assert_eq!(
+            restarted_settings.ffprobe_path,
+            ffprobe_path.to_string_lossy()
+        );
+
+        let media_info = BdmvParser::with_ffprobe(restarted_settings.ffprobe_path.clone())
+            .get_media_info("sample file.m2ts")
+            .await
+            .unwrap();
+        assert_eq!(media_info.duration, 15.0);
+
+        let output_path: PathBuf = directory.join("output file.mkv");
+        let job = MuxJob {
+            input_path: "input file.m2ts".into(),
+            output_path: output_path.to_string_lossy().into_owned(),
+            chapter_path: None,
+            tracks: Vec::new(),
+        };
+        Muxer::run_mkvmerge(&restarted_settings.mkvmerge_path, &job)
+            .await
+            .unwrap();
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "remuxed");
+
+        fs::remove_dir_all(directory).unwrap();
+    }
+}

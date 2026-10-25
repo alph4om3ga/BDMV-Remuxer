@@ -1450,8 +1450,8 @@ mod tests {
     fn settings_survive_save_and_reload_after_restart() {
         let config_dir = temporary_config_dir();
         let mut settings = Settings::default();
-        settings.mkvmerge_path = "/custom/bin/mkvmerge".into();
-        settings.ffprobe_path = "/custom/bin/ffprobe".into();
+        settings.mkvmerge_path = "/custom tools/MKV ToolNix/mkvmerge app".into();
+        settings.ffprobe_path = "/custom tools/FFmpeg/ffprobe app".into();
         settings.min_episode_duration = 1800;
         settings.min_extra_duration = 240;
         settings.op_ed_min_duration = 75;
