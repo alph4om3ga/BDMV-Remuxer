@@ -313,11 +313,17 @@ jobs:
           $mkvmerge = (Get-Command mkvmerge.exe -ErrorAction Stop).Source
           $fixture = Join-Path $env:GITHUB_WORKSPACE "src-tauri\tests\fixtures\remux-multitrack-smoke-input.mkv"
           $output = Join-Path $env:RUNNER_TEMP "bdmv-remuxer-smoke-output.mkv"
+          $stagedOutput = Join-Path (Split-Path -Parent $output) (".{0}.partial.mkv" -f (Split-Path -Leaf $output))
           $report = Join-Path $env:RUNNER_TEMP "bdmv-remuxer-smoke.log"
 
           if (-not (Test-Path $exe)) { throw "The installed application executable is missing: $exe" }
           if (-not (Test-Path $fixture)) { throw "The remux smoke fixture is missing: $fixture" }
-          Remove-Item $output, $report -Force -ErrorAction SilentlyContinue
+          Remove-Item $stagedOutput, $report -Force -ErrorAction SilentlyContinue
+          $existingOutputContents = "existing output that must be replaced"
+          Set-Content -LiteralPath $output -Value $existingOutputContents -NoNewline
+          if ((Get-Content -LiteralPath $output -Raw) -cne $existingOutputContents) {
+            throw "The smoke check failed to create its existing destination file."
+          }
           & $exe --smoke-remux $mkvmerge $fixture $output $report
           $smokeExitCode = $LASTEXITCODE
           if (Test-Path $report) { Get-Content $report | Write-Host }
@@ -326,6 +332,9 @@ jobs:
           }
           if (-not (Test-Path $output) -or (Get-Item $output).Length -eq 0) {
             throw "The installed app did not produce a non-empty remux output."
+          }
+          if (Test-Path $stagedOutput) {
+            throw "The installed app left a staged partial output behind: $stagedOutput"
           }
 
           $probeLog = Join-Path $env:RUNNER_TEMP "bdmv-remuxer-smoke-probe.log"
@@ -555,11 +564,18 @@ jobs:
           mkvmerge="$(command -v mkvmerge)"
           fixture="$GITHUB_WORKSPACE/src-tauri/tests/fixtures/remux-multitrack-smoke-input.mkv"
           output="$RUNNER_TEMP/bdmv-remuxer-smoke-output.mkv"
+          staged_output="$RUNNER_TEMP/.$(basename "$output").partial.mkv"
           report="$RUNNER_TEMP/bdmv-remuxer-smoke.log"
           probe_log="$RUNNER_TEMP/bdmv-remuxer-smoke-probe.log"
           test -x "$binary" || { echo "The mounted app executable is missing: $binary" >&2; exit 1; }
           test -f "$fixture" || { echo "The remux smoke fixture is missing: $fixture" >&2; exit 1; }
-          rm -f "$output" "$report" "$probe_log"
+          rm -f "$staged_output" "$report" "$probe_log"
+          existing_output_contents="existing output that must be replaced"
+          printf '%s' "$existing_output_contents" >"$output"
+          test "$(cat "$output")" = "$existing_output_contents" || {
+            echo "The smoke check failed to create its existing destination file." >&2
+            exit 1
+          }
 
           if ! "$binary" --smoke-remux "$mkvmerge" "$fixture" "$output" "$report"; then
             cat "$report" 2>/dev/null || true
@@ -567,6 +583,10 @@ jobs:
           fi
           cat "$report"
           test -s "$output" || { echo "The installed app did not produce a non-empty remux output." >&2; exit 1; }
+          test ! -e "$staged_output" || {
+            echo "The installed app left a staged partial output behind: $staged_output" >&2
+            exit 1
+          }
           if ! "$mkvmerge" -J "$output" >"$probe_log" 2>&1; then
             cat "$probe_log" >&2
             echo "mkvmerge could not inspect the remux output." >&2
