@@ -2661,12 +2661,89 @@ mod project_removal_tests {
 mod remux_source_change_tests {
     use super::remux_and_mark_file_completed;
     use crate::muxer::staged_output_path;
-    use crate::state::{Project, ProjectStatus};
+    use crate::state::{source_file_fingerprint, CompletedFile, Project, ProjectStatus};
     use chrono::Utc;
     use std::collections::HashMap;
     use std::fs;
     use std::path::PathBuf;
     use uuid::Uuid;
+
+    fn project_for(directory: &std::path::Path) -> Project {
+        Project {
+            id: "remux-verification-project".into(),
+            output_name: "remux-verification".into(),
+            output_path: directory.to_string_lossy().to_string(),
+            volumes: Vec::new(),
+            track_templates: HashMap::new(),
+            status: ProjectStatus::Processing,
+            progress: 0.0,
+            current_file: None,
+            completed_files: Vec::new(),
+            created_at: Utc::now(),
+            error: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn unchanged_source_is_marked_complete_with_verified_fingerprint() {
+        let directory = std::env::temp_dir().join(format!(
+            "bdmv-remuxer-unchanged-source-test-{}",
+            Uuid::new_v4()
+        ));
+        fs::create_dir_all(&directory).unwrap();
+        let source_path = directory.join("source.m2ts").to_string_lossy().to_string();
+        fs::write(&source_path, b"unchanged source contents").unwrap();
+        let expected_fingerprint = source_file_fingerprint(&source_path).unwrap();
+        let mut project = project_for(&directory);
+        let output_path = PathBuf::from(&project.output_path).join("verified.mkv");
+        let staged_path = staged_output_path(&output_path);
+
+        let result =
+            remux_and_mark_file_completed(&mut project, &source_path, &output_path, || async {
+                tokio::fs::write(&staged_path, b"verified remux output")
+                    .await
+                    .map_err(|error| error.to_string())
+            })
+            .await
+            .unwrap();
+
+        let verified_fingerprint = source_file_fingerprint(&source_path).unwrap();
+        assert_eq!(result, expected_fingerprint);
+        assert_eq!(verified_fingerprint, expected_fingerprint);
+        assert_eq!(
+            project.completed_files,
+            vec![CompletedFile {
+                path: source_path,
+                fingerprint: Some(expected_fingerprint),
+            }]
+        );
+        assert_eq!(fs::read(&output_path).unwrap(), b"verified remux output");
+        assert!(!staged_path.exists());
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[tokio::test]
+    async fn failed_remux_does_not_mark_source_complete() {
+        let directory =
+            std::env::temp_dir().join(format!("bdmv-remuxer-failed-remux-test-{}", Uuid::new_v4()));
+        fs::create_dir_all(&directory).unwrap();
+        let source_path = directory.join("source.m2ts").to_string_lossy().to_string();
+        fs::write(&source_path, b"source contents").unwrap();
+        let mut project = project_for(&directory);
+        let output_path = PathBuf::from(&project.output_path).join("failed.mkv");
+
+        let error =
+            remux_and_mark_file_completed(&mut project, &source_path, &output_path, || async {
+                Err("controlled remux failure".into())
+            })
+            .await
+            .expect_err("failed remux must not complete the source");
+
+        assert!(error.contains("controlled remux failure"));
+        assert!(!project.is_file_completed(&source_path));
+        assert!(project.completed_files.is_empty());
+        fs::remove_dir_all(directory).unwrap();
+    }
 
     #[tokio::test]
     async fn source_changed_during_remux_is_not_marked_complete() {
