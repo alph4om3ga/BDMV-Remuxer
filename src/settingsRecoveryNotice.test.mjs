@@ -168,9 +168,13 @@ test('newer-version preference warnings are shown while known settings remain sa
   assert.deepEqual(state.settings.future_preference, { enabled: true });
 });
 
-test('saving settings keeps a newer-version warning and the returned preserved settings', () => {
-  const warning = 'These preferences contain future_preference from a newer version.';
-  const savedSettings = { ...settings, future_preference: { enabled: true } };
+test('saving after a newer preference appears on disk displays the returned update guidance', () => {
+  const warning = 'These preferences include settings from a newer version of BDMV Remuxer that this version does not recognize: future_preference. Update BDMV Remuxer before changing or removing those settings. This version will preserve them when you save recognized settings.';
+  const savedSettings = {
+    ...settings,
+    mkvmerge_path: '/tools/edited-mkvmerge',
+    future_preference: { enabled: true },
+  };
   const state = applyUpdate({
     error: 'previous save failed',
     recoveryWarning: null,
@@ -178,7 +182,11 @@ test('saving settings keeps a newer-version warning and the returned preserved s
   }, getSettingsSaveSuccessUpdate(savedSettings, warning));
 
   assert.equal(state.settings, savedSettings);
+  assert.equal(state.settings.mkvmerge_path, '/tools/edited-mkvmerge');
+  assert.deepEqual(state.settings.future_preference, { enabled: true });
   assert.equal(state.recoveryWarning, warning);
-  assert.equal(getVisibleNotice(state.recoveryWarning, state.error), warning);
+  const displayedNotice = getVisibleNotice(state.recoveryWarning, state.error);
+  assert.equal(displayedNotice, warning);
+  assert.match(displayedNotice, /Update BDMV Remuxer before changing or removing those settings/);
   assert.equal(state.settingsSaveAllowed, true);
 });

@@ -1297,6 +1297,10 @@ mod tests {
         assert_eq!(saved.ffprobe_path, "/tools/ffprobe");
         assert_eq!(saved_json["newer_flag"]["enabled"], true);
         assert_eq!(saved.unrecognized["newer_flag"]["enabled"], true);
+        let warning = saved.unrecognized_fields_warning().unwrap();
+        assert!(warning.contains("newer_flag"));
+        assert!(warning.contains("Update BDMV Remuxer"));
+        assert!(warning.contains("preserve them when you save recognized settings"));
 
         std::fs::remove_dir_all(config_dir).unwrap();
     }

@@ -1424,10 +1424,18 @@ async fn save_settings(
     settings: Settings,
     state: State<'_, AppStateType>,
 ) -> Result<SettingsSaveResponse, String> {
+    let config_dir = settings_config_dir()?;
+    save_settings_with(settings, state.inner(), &config_dir)
+}
+
+fn save_settings_with(
+    settings: Settings,
+    state: &AppStateType,
+    config_dir: &Path,
+) -> Result<SettingsSaveResponse, String> {
     let mut app_state = state.lock();
     app_state.ensure_settings_savable()?;
-    let config_dir = settings_config_dir()?;
-    let saved_settings = settings.save_to_config_dir(&config_dir)?;
+    let saved_settings = settings.save_to_config_dir(config_dir)?;
     let warning = saved_settings.unrecognized_fields_warning();
     app_state.settings = saved_settings.clone();
     app_state.set_settings_recovery(warning.clone(), None, true, None);
@@ -1994,6 +2002,85 @@ mod settings_recovery_restore_tests {
             .unwrap()
             .contains("future_preference"));
 
+        let _ = fs::remove_dir_all(config_dir);
+    }
+}
+
+#[cfg(test)]
+mod settings_save_tests {
+    use super::{save_settings_with, AppStateType};
+    use crate::state::{AppState, Settings};
+    use parking_lot::Mutex;
+    use serde_json::Value;
+    use std::fs;
+    use std::sync::Arc;
+    use uuid::Uuid;
+
+    #[test]
+    fn save_command_reports_preferences_added_after_launch() {
+        let config_dir = std::env::temp_dir().join(format!(
+            "bdmv-remuxer-settings-save-test-{}",
+            Uuid::new_v4()
+        ));
+        fs::create_dir_all(&config_dir).unwrap();
+        let settings_path = config_dir.join("settings.json");
+        fs::write(
+            &settings_path,
+            r#"{"mkvmerge_path":"/launch/tools/mkvmerge"}"#,
+        )
+        .unwrap();
+
+        let load_outcome = Settings::load_with_recovery(&config_dir);
+        let state: AppStateType = Arc::new(Mutex::new(AppState::default()));
+        {
+            let mut app_state = state.lock();
+            app_state.settings = load_outcome.settings;
+            app_state.set_settings_recovery(
+                load_outcome.recovery_warning,
+                load_outcome.recovery_backup_path,
+                load_outcome.can_save,
+                load_outcome.recovery_source_hash,
+            );
+        }
+
+        let newer_preference = serde_json::json!({
+            "enabled": true,
+            "mode": "preserve"
+        });
+        fs::write(
+            &settings_path,
+            serde_json::to_vec(&serde_json::json!({
+                "future_preference": newer_preference,
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let mut edited_settings = state.lock().settings.clone();
+        edited_settings.ffprobe_path = "/edited/tools/ffprobe".into();
+        let response = save_settings_with(edited_settings, &state, &config_dir).unwrap();
+        let warning = response.recovery_warning.as_deref().unwrap();
+
+        assert_eq!(response.settings.ffprobe_path, "/edited/tools/ffprobe");
+        assert_eq!(
+            response.settings.unrecognized["future_preference"],
+            newer_preference
+        );
+        assert!(warning.contains("future_preference"));
+        assert!(warning.contains("Update BDMV Remuxer before changing or removing those settings"));
+        assert!(warning.contains("preserve them when you save recognized settings"));
+        assert_eq!(
+            state
+                .lock()
+                .settings_recovery_warning()
+                .map(str::to_string)
+                .as_deref(),
+            Some(warning)
+        );
+
+        let saved_json: Value = serde_json::from_slice(&fs::read(&settings_path).unwrap()).unwrap();
+        assert_eq!(saved_json["ffprobe_path"], "/edited/tools/ffprobe");
+        assert_eq!(saved_json["future_preference"], newer_preference);
         let _ = fs::remove_dir_all(config_dir);
     }
 }
