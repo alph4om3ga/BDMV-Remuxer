@@ -161,14 +161,7 @@ impl Settings {
             );
         }
 
-        if settings.op_ed_min_duration > settings.op_ed_max_duration {
-            settings.op_ed_min_duration = Self::default().op_ed_min_duration;
-            settings.op_ed_max_duration = Self::default().op_ed_max_duration;
-            warnings.push(
-                "The OP/ED minimum duration is greater than its maximum; the default OP/ED range will be restored."
-                    .to_string(),
-            );
-        }
+        validate_duration_values(&mut settings, &mut warnings);
 
         Ok(SettingsRecoveryPreview {
             settings,
@@ -189,13 +182,20 @@ impl Settings {
         let path = config_dir.join(Self::FILE_NAME);
         match fs::read(&path) {
             Ok(contents) => match serde_json::from_slice::<Self>(&contents) {
-                Ok(settings) => SettingsLoadOutcome {
-                    recovery_warning: settings.unrecognized_fields_warning(),
-                    settings,
-                    recovery_backup_path: None,
-                    can_save: true,
-                    recovery_source_hash: None,
-                },
+                Ok(mut settings) => {
+                    let mut warnings = Vec::new();
+                    validate_duration_values(&mut settings, &mut warnings);
+                    if let Some(warning) = settings.unrecognized_fields_warning() {
+                        warnings.push(warning);
+                    }
+                    SettingsLoadOutcome {
+                        recovery_warning: (!warnings.is_empty()).then(|| warnings.join(" ")),
+                        settings,
+                        recovery_backup_path: None,
+                        can_save: true,
+                        recovery_source_hash: None,
+                    }
+                }
                 Err(parse_error) => match preserve_damaged_settings(config_dir, &contents) {
                     Ok(backup_path) => SettingsLoadOutcome {
                         settings: Self::default(),
@@ -396,6 +396,58 @@ fn restore_positive_integer_field(
             "{} was invalid; a positive whole number is required, so the default value will be used.",
             label
         )),
+    }
+}
+
+fn validate_duration_values(settings: &mut Settings, warnings: &mut Vec<String>) {
+    let defaults = Settings::default();
+    validate_positive_duration(
+        &mut settings.min_episode_duration,
+        defaults.min_episode_duration,
+        "Minimum episode duration",
+        warnings,
+    );
+    validate_positive_duration(
+        &mut settings.min_extra_duration,
+        defaults.min_extra_duration,
+        "Minimum extra duration",
+        warnings,
+    );
+    validate_positive_duration(
+        &mut settings.op_ed_min_duration,
+        defaults.op_ed_min_duration,
+        "OP/ED minimum duration",
+        warnings,
+    );
+    validate_positive_duration(
+        &mut settings.op_ed_max_duration,
+        defaults.op_ed_max_duration,
+        "OP/ED maximum duration",
+        warnings,
+    );
+
+    if settings.op_ed_min_duration > settings.op_ed_max_duration {
+        settings.op_ed_min_duration = defaults.op_ed_min_duration;
+        settings.op_ed_max_duration = defaults.op_ed_max_duration;
+        warnings.push(
+            "The OP/ED minimum duration is greater than its maximum; the default OP/ED range will be restored."
+                .to_string(),
+        );
+    }
+}
+
+fn validate_positive_duration(
+    value: &mut i64,
+    default: i64,
+    label: &str,
+    warnings: &mut Vec<String>,
+) {
+    if *value <= 0 {
+        *value = default;
+        warnings.push(format!(
+            "{} was invalid; a positive whole number is required, so the default value will be used.",
+            label
+        ));
     }
 }
 
@@ -1100,6 +1152,86 @@ mod tests {
         );
         assert!(settings.recovery_warning.is_none());
         assert!(settings.can_save);
+    }
+
+    #[test]
+    fn startup_replaces_non_positive_duration_values_and_warns() {
+        let config_dir = temporary_config_dir();
+        std::fs::create_dir_all(&config_dir).unwrap();
+        let settings_path = config_dir.join("settings.json");
+        std::fs::write(
+            &settings_path,
+            r#"{
+                "min_episode_duration": 0,
+                "min_extra_duration": -1,
+                "op_ed_min_duration": 0,
+                "op_ed_max_duration": -10
+            }"#,
+        )
+        .unwrap();
+
+        let outcome = Settings::load_with_recovery(&config_dir);
+        let defaults = Settings::default();
+        let warning = outcome.recovery_warning.as_deref().unwrap();
+
+        assert!(outcome.can_save);
+        assert!(outcome.recovery_backup_path.is_none());
+        assert_eq!(
+            outcome.settings.min_episode_duration,
+            defaults.min_episode_duration
+        );
+        assert_eq!(
+            outcome.settings.min_extra_duration,
+            defaults.min_extra_duration
+        );
+        assert_eq!(
+            outcome.settings.op_ed_min_duration,
+            defaults.op_ed_min_duration
+        );
+        assert_eq!(
+            outcome.settings.op_ed_max_duration,
+            defaults.op_ed_max_duration
+        );
+        assert!(warning.contains("Minimum episode duration was invalid"));
+        assert!(warning.contains("Minimum extra duration was invalid"));
+        assert!(warning.contains("OP/ED minimum duration was invalid"));
+        assert!(warning.contains("OP/ED maximum duration was invalid"));
+        assert!(
+            std::fs::read_to_string(&settings_path)
+                .unwrap()
+                .contains("\"min_episode_duration\": 0"),
+            "startup should not rewrite the saved preferences"
+        );
+
+        std::fs::remove_dir_all(config_dir).unwrap();
+    }
+
+    #[test]
+    fn startup_replaces_reversed_op_ed_bounds_and_warns() {
+        let config_dir = temporary_config_dir();
+        std::fs::create_dir_all(&config_dir).unwrap();
+        std::fs::write(
+            config_dir.join("settings.json"),
+            r#"{"op_ed_min_duration": 120, "op_ed_max_duration": 90}"#,
+        )
+        .unwrap();
+
+        let outcome = Settings::load_with_recovery(&config_dir);
+        let defaults = Settings::default();
+        let warning = outcome.recovery_warning.as_deref().unwrap();
+
+        assert_eq!(
+            outcome.settings.op_ed_min_duration,
+            defaults.op_ed_min_duration
+        );
+        assert_eq!(
+            outcome.settings.op_ed_max_duration,
+            defaults.op_ed_max_duration
+        );
+        assert!(warning.contains("The OP/ED minimum duration is greater than its maximum"));
+        assert!(outcome.can_save);
+
+        std::fs::remove_dir_all(config_dir).unwrap();
     }
 
     #[test]
