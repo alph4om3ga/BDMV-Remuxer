@@ -1,13 +1,26 @@
+const retryingProjectIds = new Set();
+
 export async function retryProjectWithQueue(projectId, {
   retry,
   startMuxing,
   getMuxerStatus,
   onRetry,
+  onRetrying,
 }) {
-  const project = await retry(projectId);
-  onRetry(project);
+  if (retryingProjectIds.has(projectId)) return false;
 
-  if (!getMuxerStatus().is_running) {
-    await startMuxing();
+  retryingProjectIds.add(projectId);
+  try {
+    onRetrying?.(projectId, true);
+    const project = await retry(projectId);
+    onRetry(project);
+
+    if (!getMuxerStatus().is_running) {
+      await startMuxing();
+    }
+    return true;
+  } finally {
+    retryingProjectIds.delete(projectId);
+    onRetrying?.(projectId, false);
   }
 }

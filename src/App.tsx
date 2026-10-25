@@ -192,6 +192,7 @@ const VolumeCard: React.FC<VolumeCardProps> = ({
 interface QueueItemProps {
   project: Project;
   isActive: boolean;
+  isRetrying: boolean;
   onRemove: () => void;
   onRetry: () => void;
   onChangeOutputPath: () => void;
@@ -200,6 +201,7 @@ interface QueueItemProps {
 const QueueItem: React.FC<QueueItemProps> = ({
   project,
   isActive,
+  isRetrying,
   onRemove,
   onRetry,
   onChangeOutputPath,
@@ -256,8 +258,13 @@ const QueueItem: React.FC<QueueItemProps> = ({
           >
             <FolderInput size={14} />
           </button>
-          <button className="queue-retry" onClick={onRetry} title="Retry unfinished files">
-            <RotateCw size={14} /> Retry
+          <button
+            className="queue-retry"
+            onClick={onRetry}
+            disabled={isRetrying}
+            title={isRetrying ? 'Retrying unfinished files' : 'Retry unfinished files'}
+          >
+            <RotateCw size={14} /> {isRetrying ? 'Retrying…' : 'Retry'}
           </button>
         </div>
       )}
@@ -759,6 +766,7 @@ const App: React.FC = () => {
   const {
     volumes,
     queue,
+    retryingProjects,
     settings,
     trackTemplates,
     selectedFileId,
@@ -926,6 +934,7 @@ const App: React.FC = () => {
                   key={project.id}
                   project={project}
                   isActive={project.status === 'processing'}
+                  isRetrying={Boolean(retryingProjects[project.id])}
                   onRemove={() => removeProject(project.id)}
                   onRetry={() => retryProject(project.id)}
                   onChangeOutputPath={() => changeProjectOutputPath(project.id)}

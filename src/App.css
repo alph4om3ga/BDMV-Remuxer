@@ -279,6 +279,7 @@ input:focus, select:focus {
 }
 
 .queue-retry:hover { background: rgba(239,68,68,.2); }
+.queue-retry:disabled { opacity: .65; cursor: wait; }
 
 .queue-name {
   font-size: 13px;

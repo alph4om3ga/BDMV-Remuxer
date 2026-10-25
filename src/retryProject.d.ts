@@ -7,5 +7,6 @@ export function retryProjectWithQueue(
     startMuxing: () => Promise<void>;
     getMuxerStatus: () => { is_running: boolean; is_paused: boolean };
     onRetry: (project: Project) => void;
+    onRetrying?: (projectId: string, isRetrying: boolean) => void;
   },
-): Promise<void>;
+): Promise<boolean>;

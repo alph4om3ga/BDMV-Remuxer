@@ -65,3 +65,43 @@ test('a rejected retry does not update the visible queue or start muxing', async
   assert.deepEqual(calls, [['retry']]);
   assert.equal(onRetryCalled, false);
 });
+
+test('rapid repeated retries for the same project only enqueue and start once', async () => {
+  const retriedProject = { id: 'failed-project', status: 'pending' };
+  const calls = [];
+  const retryingUpdates = [];
+  let resolveRetry;
+  const retryPromise = new Promise(resolve => {
+    resolveRetry = resolve;
+  });
+  const options = {
+    retry: async (projectId) => {
+      calls.push(['retry', projectId]);
+      return retryPromise;
+    },
+    startMuxing: async () => calls.push(['start']),
+    getMuxerStatus: () => ({ is_running: false, is_paused: false }),
+    onRetry: (project) => calls.push(['onRetry', project.id]),
+    onRetrying: (projectId, isRetrying) =>
+      retryingUpdates.push([projectId, isRetrying]),
+  };
+
+  const firstRetry = retryProjectWithQueue(retriedProject.id, options);
+  const repeatedRetry = retryProjectWithQueue(retriedProject.id, options);
+
+  assert.equal(await repeatedRetry, false);
+  assert.deepEqual(calls, [['retry', retriedProject.id]]);
+  assert.deepEqual(retryingUpdates, [[retriedProject.id, true]]);
+
+  resolveRetry(retriedProject);
+  assert.equal(await firstRetry, true);
+  assert.deepEqual(calls, [
+    ['retry', retriedProject.id],
+    ['onRetry', retriedProject.id],
+    ['start'],
+  ]);
+  assert.deepEqual(retryingUpdates, [
+    [retriedProject.id, true],
+    [retriedProject.id, false],
+  ]);
+});

@@ -60,6 +60,7 @@ interface AppStore {
   outputName: string;
   outputPath: string;
   retryingProbeFailures: Record<string, boolean>;
+  retryingProjects: Record<string, boolean>;
 
   // Actions
   loadBdmv: () => Promise<void>;
@@ -119,6 +120,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
   outputName: '',
   outputPath: '',
   retryingProbeFailures: {},
+  retryingProjects: {},
 
   loadBdmv: async () => {
     try {
@@ -330,6 +332,12 @@ export const useAppStore = create<AppStore>((set, get) => ({
           error: null,
           queue: state.queue.map(item => item.id === project.id ? project : item),
         })),
+        onRetrying: (id, isRetrying) => set(state => {
+          const retryingProjects = { ...state.retryingProjects };
+          if (isRetrying) retryingProjects[id] = true;
+          else delete retryingProjects[id];
+          return { retryingProjects };
+        }),
       });
     } catch (e) {
       set({ error: String(e) });
