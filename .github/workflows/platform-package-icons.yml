@@ -13,6 +13,7 @@ on:
       - "index.html"
       - "scripts/verify-platform-icons.mjs"
       - "scripts/smoke-macos-window.swift"
+      - "scripts/smoke-windows-interface.ps1"
       - "scripts/smoke-installed-close.ps1"
       - "src/**"
       - "src-tauri/**"
@@ -31,6 +32,7 @@ on:
       - "index.html"
       - "scripts/verify-platform-icons.mjs"
       - "scripts/smoke-macos-window.swift"
+      - "scripts/smoke-windows-interface.ps1"
       - "scripts/smoke-installed-close.ps1"
       - "src/**"
       - "src-tauri/**"
@@ -74,6 +76,22 @@ jobs:
         run: cargo test --manifest-path src-tauri/Cargo.toml --no-default-features
       - name: Build Windows installer
         run: npm run tauri -- build --bundles msi --ci
+      - name: Verify blank-interface smoke check rejects a missing heading
+        shell: pwsh
+        run: |
+          $output = & pwsh -NoProfile -File scripts/smoke-windows-interface.ps1 -TestMissingHeading 2>&1
+          $status = $LASTEXITCODE
+          $diagnostic = $output -join "`n"
+          if ($status -ne 3) {
+            throw "The missing-heading check exited with $status instead of 3. Output: $diagnostic"
+          }
+          if (
+            $diagnostic -notlike "*main interface heading was not found*" -or
+            $diagnostic -notlike "*The webview may be blank or failed to load.*"
+          ) {
+            throw "The missing-heading check did not report the blank-interface diagnostic. Output: $diagnostic"
+          }
+          Write-Host "Verified the Windows blank-interface check exits 3 and reports the missing heading."
       - name: Verify installer and executable icon
         shell: pwsh
         run: |
@@ -91,6 +109,7 @@ jobs:
       - name: Install MSI and verify the app renders its main interface
         shell: pwsh
         run: |
+          . "$env:GITHUB_WORKSPACE\scripts\smoke-windows-interface.ps1"
           $msi = Get-ChildItem "src-tauri/target/release/bundle/msi" -Filter "*.msi" -File |
             Select-Object -First 1
           if (-not $msi) { throw "No Windows MSI is available to install." }
@@ -177,7 +196,7 @@ jobs:
               Start-Sleep -Seconds 1
             }
             if (-not $interfaceRendered) {
-              $message = "The installed application opened a native window, but its rendered main interface heading was not found. The webview may be blank or failed to load."
+              $message = Get-MissingInterfaceHeadingDiagnostic -InterfaceRendered:$interfaceRendered
               if ($uiAutomationError) {
                 $message += " UI Automation error: $uiAutomationError"
               }
@@ -417,6 +436,21 @@ jobs:
           test -n "$app" || { echo "The mounted DMG does not contain a macOS app bundle." >&2; exit 1; }
 
           swiftc scripts/smoke-macos-window.swift -o "$checker"
+          set +e
+          failure_output="$("$checker" --test-missing-heading 2>&1)"
+          checker_status=$?
+          set -e
+          if [ "$checker_status" -ne 3 ]; then
+            echo "The missing-heading check exited with $checker_status instead of 3." >&2
+            echo "$failure_output" >&2
+            exit 1
+          fi
+          if ! grep -Fq "main interface heading" <<< "$failure_output" ||
+             ! grep -Fq "The webview may be blank or failed to load." <<< "$failure_output"; then
+            echo "The missing-heading check did not report the blank-interface diagnostic." >&2
+            echo "$failure_output" >&2
+            exit 1
+          fi
           open -n "$app"
 
           window_opened=false

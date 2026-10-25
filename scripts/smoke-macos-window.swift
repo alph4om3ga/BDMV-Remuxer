@@ -3,6 +3,22 @@ import ApplicationServices
 import CoreGraphics
 import Foundation
 
+let expectedHeading = "BDMV Remuxer main interface"
+
+func reportMissingHeading() -> Never {
+    fputs(
+        "The app has a visible window, but its rendered main interface heading " +
+        "\"\(expectedHeading)\" was not found in the accessibility tree. The webview may be blank or failed to load.\n",
+        stderr
+    )
+    exit(3)
+}
+
+if CommandLine.arguments.count == 2,
+   CommandLine.arguments[1] == "--test-missing-heading" {
+    reportMissingHeading()
+}
+
 guard CommandLine.arguments.count == 2 else {
     fputs("Usage: smoke-macos-window <bundle-id>\n", stderr)
     exit(64)
@@ -44,7 +60,6 @@ guard hasVisibleWindow else {
 
 let appElement = AXUIElementCreateApplication(app.processIdentifier)
 AXUIElementSetMessagingTimeout(appElement, 1.0)
-let expectedHeading = "BDMV Remuxer main interface"
 var inspectedElements = 0
 
 func hasRenderedHeading(_ element: AXUIElement, depth: Int = 0) -> Bool {
@@ -85,12 +100,7 @@ func hasRenderedHeading(_ element: AXUIElement, depth: Int = 0) -> Bool {
 }
 
 guard hasRenderedHeading(appElement) else {
-    fputs(
-        "The app has a visible window, but its rendered main interface heading " +
-        "\"\(expectedHeading)\" was not found in the accessibility tree. The webview may be blank or failed to load.\n",
-        stderr
-    )
-    exit(3)
+    reportMissingHeading()
 }
 
 print(app.processIdentifier)
