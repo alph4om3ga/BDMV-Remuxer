@@ -575,6 +575,21 @@ input:focus, select:focus {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
+.probe-failure-retry {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 8px;
+  padding: 5px 9px;
+  border: 1px solid rgba(239, 68, 68, .45);
+  border-radius: 6px;
+  background: rgba(239, 68, 68, .1);
+  color: var(--text-primary);
+  font-size: 12px;
+  cursor: pointer;
+}
+.probe-failure-retry:hover:not(:disabled) { background: rgba(239, 68, 68, .2); }
+.probe-failure-retry:disabled { opacity: .65; cursor: wait; }
 
 /* ============================================================================
    File Item

@@ -103,6 +103,9 @@ interface VolumeCardProps {
 const VolumeCard: React.FC<VolumeCardProps> = ({ 
   volume, isExpanded, onToggle, selectedFileId, onFileSelect, onEditFile 
 }) => {
+  const { retryProbeFailure, retryingProbeFailures } = useAppStore();
+  const isRetryingInVolume = Object.keys(retryingProbeFailures)
+    .some(key => key.startsWith(`${volume.id}:`));
   const categoryCounts = volume.files.reduce((acc, f) => {
     acc[f.category] = (acc[f.category] || 0) + 1;
     return acc;
@@ -151,6 +154,16 @@ const VolumeCard: React.FC<VolumeCardProps> = ({
                   <li key={`${failure.path}-${index}`}>
                     <strong>{failure.path}</strong>
                     <pre>{failure.diagnostic}</pre>
+                    <button
+                      className="probe-failure-retry"
+                      type="button"
+                      disabled={isRetryingInVolume}
+                      aria-label={`Retry probing ${failure.path}`}
+                      onClick={() => retryProbeFailure(volume.id, failure.path)}
+                    >
+                      <RotateCw size={14} />
+                      {retryingProbeFailures[`${volume.id}:${failure.path}`] ? 'Retrying…' : 'Retry'}
+                    </button>
                   </li>
                 ))}
               </ul>

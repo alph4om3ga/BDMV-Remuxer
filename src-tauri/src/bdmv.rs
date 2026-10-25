@@ -263,6 +263,41 @@ impl BdmvParser {
         self.probe_file(path).await
     }
 
+    /// Probe a previously skipped BDMV file and prepare it without changing
+    /// metadata on files that have already been loaded or edited.
+    pub async fn retry_file(
+        &self,
+        path: &str,
+        existing_files: &[MediaFile],
+        volume_path: &str,
+    ) -> Result<MediaFile, BdmvError> {
+        let mut file = self.probe_file(path).await?;
+        let mut op_count = existing_files
+            .iter()
+            .filter(|f| f.category == "OP")
+            .count() as i32;
+        let mut ed_count = existing_files
+            .iter()
+            .filter(|f| f.category == "ED")
+            .count() as i32;
+        self.classify_file(&mut file, &mut op_count, &mut ed_count);
+        self.assign_next_number(&mut file, existing_files);
+
+        let stem = Path::new(&file.filename)
+            .file_stem()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_default();
+        let chapter_candidate = Path::new(volume_path)
+            .join("BDMV")
+            .join("BACKUP")
+            .join(format!("{}.xml", stem));
+        if chapter_candidate.exists() {
+            file.chapter_file = Some(chapter_candidate.to_string_lossy().to_string());
+        }
+
+        Ok(file)
+    }
+
     fn build_media_file(&self, path: &str, probe: FfprobeOutput) -> Result<MediaFile, BdmvError> {
         let duration: f64 = probe
             .format
@@ -352,33 +387,81 @@ impl BdmvParser {
 
     /// Auto-classify files by duration using default thresholds
     fn classify_files(&self, files: &mut Vec<MediaFile>) {
-        const MIN_EPISODE: f64 = 1200.0; // 20 min
-        const MIN_EXTRA: f64   = 120.0;  // 2 min
-        const OP_ED_MIN: f64   = 80.0;
-        const OP_ED_MAX: f64   = 110.0;
-
         let mut op_count = 0i32;
         let mut ed_count = 0i32;
 
         for file in files.iter_mut() {
-            let d = file.duration;
-            file.category = if d >= MIN_EPISODE {
-                "EPISODE".into()
-            } else if d >= OP_ED_MIN && d <= OP_ED_MAX {
-                // Alternate OP/ED assignment by pairs
-                let total = op_count + ed_count;
-                if total % 2 == 0 {
-                    op_count += 1;
-                    "OP".into()
-                } else {
-                    ed_count += 1;
-                    "ED".into()
-                }
-            } else if d >= MIN_EXTRA {
-                "SPECIAL".into()
+            self.classify_file(file, &mut op_count, &mut ed_count);
+        }
+    }
+
+    fn classify_file(&self, file: &mut MediaFile, op_count: &mut i32, ed_count: &mut i32) {
+        const MIN_EPISODE: f64 = 1200.0; // 20 min
+        const MIN_EXTRA: f64 = 120.0; // 2 min
+        const OP_ED_MIN: f64 = 80.0;
+        const OP_ED_MAX: f64 = 110.0;
+
+        file.category = if file.duration >= MIN_EPISODE {
+            "EPISODE".into()
+        } else if file.duration >= OP_ED_MIN && file.duration <= OP_ED_MAX {
+            // Alternate OP/ED assignment by pairs.
+            if (*op_count + *ed_count) % 2 == 0 {
+                *op_count += 1;
+                "OP".into()
             } else {
-                "OTHER".into()
-            };
+                *ed_count += 1;
+                "ED".into()
+            }
+        } else if file.duration >= MIN_EXTRA {
+            "SPECIAL".into()
+        } else {
+            "OTHER".into()
+        };
+    }
+
+    fn assign_next_number(&self, file: &mut MediaFile, existing_files: &[MediaFile]) {
+        match file.category.as_str() {
+            "EPISODE" => {
+                file.episode_number = Some(
+                    existing_files
+                        .iter()
+                        .filter_map(|f| f.episode_number)
+                        .max()
+                        .unwrap_or(0)
+                        + 1,
+                );
+            }
+            "OP" => {
+                file.op_number = Some(
+                    existing_files
+                        .iter()
+                        .filter_map(|f| f.op_number)
+                        .max()
+                        .unwrap_or(0)
+                        + 1,
+                );
+            }
+            "ED" => {
+                file.ed_number = Some(
+                    existing_files
+                        .iter()
+                        .filter_map(|f| f.ed_number)
+                        .max()
+                        .unwrap_or(0)
+                        + 1,
+                );
+            }
+            "SPECIAL" => {
+                file.special_number = Some(
+                    existing_files
+                        .iter()
+                        .filter_map(|f| f.special_number)
+                        .max()
+                        .unwrap_or(0)
+                        + 1,
+                );
+            }
+            _ => {}
         }
     }
 
@@ -403,7 +486,7 @@ impl BdmvParser {
 
 #[cfg(test)]
 mod tests {
-    use super::{BdmvError, BdmvParser};
+    use super::{BdmvError, BdmvParser, MediaFile};
     use std::fs;
     use std::path::PathBuf;
 
@@ -502,6 +585,68 @@ esac
             "{}",
             result.probe_failures[0].diagnostic
         );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn retrying_a_skipped_file_preserves_existing_metadata_and_assigns_its_number() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root =
+            std::env::temp_dir().join(format!("bdmv-remuxer-retry-probe-{}", std::process::id()));
+        let stream = root.join("BDMV").join("STREAM");
+        let backup = root.join("BDMV").join("BACKUP");
+        fs::create_dir_all(&stream).unwrap();
+        fs::create_dir_all(&backup).unwrap();
+        let retry_path = stream.join("00002-retry.m2ts");
+        fs::write(&retry_path, b"good").unwrap();
+        let chapter_path = backup.join("00002-retry.xml");
+        fs::write(&chapter_path, b"<chapters/>").unwrap();
+
+        let ffprobe = root.join("fake-ffprobe");
+        fs::write(
+            &ffprobe,
+            r#"#!/bin/sh
+echo '{"streams":[],"format":{"duration":"1800","size":"4"}}'
+"#,
+        )
+        .unwrap();
+        let mut permissions = fs::metadata(&ffprobe).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&ffprobe, permissions).unwrap();
+
+        let existing = MediaFile {
+            id: "existing-file".into(),
+            filename: "00001.m2ts".into(),
+            path: stream.join("00001.m2ts").to_string_lossy().to_string(),
+            duration: 1800.0,
+            size: 4,
+            category: "EPISODE".into(),
+            tracks: Vec::new(),
+            episode_number: Some(7),
+            op_number: None,
+            ed_number: None,
+            special_number: None,
+            chapter_file: None,
+        };
+        let result = BdmvParser::with_ffprobe(ffprobe.to_string_lossy().to_string())
+            .retry_file(
+                retry_path.to_string_lossy().as_ref(),
+                &[existing.clone()],
+                root.to_string_lossy().as_ref(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(result.category, "EPISODE");
+        assert_eq!(result.episode_number, Some(8));
+        assert_eq!(
+            result.chapter_file.as_deref(),
+            Some(chapter_path.to_string_lossy().as_ref())
+        );
+        assert_eq!(existing.episode_number, Some(7));
 
         let _ = fs::remove_dir_all(&root);
     }

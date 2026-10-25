@@ -57,10 +57,12 @@ interface AppStore {
   error: string | null;
   outputName: string;
   outputPath: string;
+  retryingProbeFailures: Record<string, boolean>;
 
   // Actions
   loadBdmv: () => Promise<void>;
   loadMultipleBdmvs: () => Promise<void>;
+  retryProbeFailure: (volumeId: string, path: string) => Promise<void>;
   clearVolumes: () => Promise<void>;
   selectFile: (fileId: string) => void;
   toggleVolumeExpanded: (volumeId: string) => void;
@@ -111,6 +113,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
   error: null,
   outputName: '',
   outputPath: '',
+  retryingProbeFailures: {},
 
   loadBdmv: async () => {
     try {
@@ -155,6 +158,47 @@ export const useAppStore = create<AppStore>((set, get) => ({
       }));
     } catch (e) {
       set({ error: String(e), isLoading: false });
+    }
+  },
+
+  retryProbeFailure: async (volumeId, path) => {
+    const retryKey = `${volumeId}:${path}`;
+    if (Object.keys(get().retryingProbeFailures).some(key => key.startsWith(`${volumeId}:`))) return;
+    set(state => ({
+      retryingProbeFailures: { ...state.retryingProbeFailures, [retryKey]: true },
+    }));
+
+    try {
+      const result = await invoke<{
+        volume_id: string;
+        path: string;
+        file: Volume['files'][number] | null;
+        failure: Volume['probe_failures'][number] | null;
+      }>('retry_probe_failure', { volumeId, path });
+      set(state => ({
+        volumes: state.volumes.map(volume => {
+          if (volume.id !== result.volume_id) return volume;
+          const files = result.file && !volume.files.some(file => file.path === result.path)
+            ? [...volume.files, result.file]
+            : volume.files;
+          const probeFailures = result.file
+            ? volume.probe_failures.filter(failure => failure.path !== result.path)
+            : result.failure
+              ? volume.probe_failures.map(failure =>
+                failure.path === result.path ? result.failure! : failure
+              )
+              : volume.probe_failures;
+          return { ...volume, files, probe_failures: probeFailures };
+        }),
+      }));
+    } catch (e) {
+      set({ error: String(e) });
+    } finally {
+      set(state => {
+        const retryingProbeFailures = { ...state.retryingProbeFailures };
+        delete retryingProbeFailures[retryKey];
+        return { retryingProbeFailures };
+      });
     }
   },
 

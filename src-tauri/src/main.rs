@@ -51,6 +51,190 @@ async fn load_bdmv(path: String, state: State<'_, AppStateType>) -> Result<Volum
     Ok(volume)
 }
 
+#[derive(Serialize)]
+struct ProbeRetryResult {
+    volume_id: String,
+    path: String,
+    file: Option<MediaFile>,
+    failure: Option<crate::bdmv::ProbeFailure>,
+}
+
+fn apply_probe_retry_result(
+    volume: &mut Volume,
+    path: &str,
+    probe_result: Result<MediaFile, String>,
+) -> Result<ProbeRetryResult, String> {
+    let failure_index = volume
+        .probe_failures
+        .iter()
+        .position(|failure| failure.path == path)
+        .ok_or_else(|| "Skipped source file not found".to_string())?;
+
+    let result = match probe_result {
+        Ok(file) => {
+            let file = if let Some(existing) = volume.files.iter().find(|file| file.path == path) {
+                existing.clone()
+            } else {
+                volume.files.push(file.clone());
+                file
+            };
+            volume.probe_failures.remove(failure_index);
+            ProbeRetryResult {
+                volume_id: volume.id.clone(),
+                path: path.to_string(),
+                file: Some(file),
+                failure: None,
+            }
+        }
+        Err(diagnostic) => {
+            let failure = crate::bdmv::ProbeFailure {
+                path: path.to_string(),
+                diagnostic,
+            };
+            volume.probe_failures[failure_index] = failure.clone();
+            ProbeRetryResult {
+                volume_id: volume.id.clone(),
+                path: path.to_string(),
+                file: None,
+                failure: Some(failure),
+            }
+        }
+    };
+    Ok(result)
+}
+
+#[tauri::command]
+async fn retry_probe_failure(
+    volume_id: String,
+    path: String,
+    state: State<'_, AppStateType>,
+) -> Result<ProbeRetryResult, String> {
+    let (ffprobe_path, volume_path, existing_files) = {
+        let app_state = state.lock();
+        let volume = app_state
+            .current_volumes
+            .iter()
+            .find(|volume| volume.id == volume_id)
+            .ok_or_else(|| "Volume not found".to_string())?;
+        if !volume
+            .probe_failures
+            .iter()
+            .any(|failure| failure.path == path)
+        {
+            return Err("Skipped source file not found".into());
+        }
+
+        let volume_path = Path::new(&path)
+            .parent()
+            .and_then(Path::parent)
+            .and_then(Path::parent)
+            .ok_or_else(|| "Could not determine the BDMV folder for this source file".to_string())?
+            .to_string_lossy()
+            .to_string();
+        (
+            app_state.settings.ffprobe_path.clone(),
+            volume_path,
+            volume.files.clone(),
+        )
+    };
+
+    let parser = BdmvParser::with_ffprobe(ffprobe_path);
+    let probe_result = parser
+        .retry_file(&path, &existing_files, &volume_path)
+        .await;
+    let mut app_state = state.lock();
+    let volume = app_state
+        .current_volumes
+        .iter_mut()
+        .find(|volume| volume.id == volume_id)
+        .ok_or_else(|| "Volume not found".to_string())?;
+    let result = apply_probe_retry_result(volume, &path, probe_result.map_err(|e| e.to_string()))?;
+
+    app_state.persist_workspace()?;
+    Ok(result)
+}
+
+#[cfg(test)]
+mod probe_retry_tests {
+    use super::{apply_probe_retry_result, MediaFile, Volume};
+    use crate::bdmv::ProbeFailure;
+
+    fn sample_file(id: &str, path: &str) -> MediaFile {
+        MediaFile {
+            id: id.into(),
+            filename: path.rsplit('/').next().unwrap_or(path).into(),
+            path: path.into(),
+            duration: 1800.0,
+            size: 123,
+            category: "EPISODE".into(),
+            tracks: Vec::new(),
+            episode_number: Some(3),
+            op_number: None,
+            ed_number: None,
+            special_number: None,
+            chapter_file: None,
+        }
+    }
+
+    fn volume() -> Volume {
+        Volume {
+            id: "volume-id".into(),
+            name: "Disc".into(),
+            volume_number: 1,
+            files: vec![sample_file("loaded-file", "/disc/BDMV/STREAM/00001.m2ts")],
+            probe_failures: vec![ProbeFailure {
+                path: "/disc/BDMV/STREAM/00002.m2ts".into(),
+                diagnostic: "first diagnostic".into(),
+            }],
+        }
+    }
+
+    #[test]
+    fn failed_probe_retry_updates_its_diagnostic_without_changing_loaded_files() {
+        let mut volume = volume();
+        let existing_files = volume.files.clone();
+
+        let result = apply_probe_retry_result(
+            &mut volume,
+            "/disc/BDMV/STREAM/00002.m2ts",
+            Err("latest diagnostic".into()),
+        )
+        .unwrap();
+
+        assert_eq!(volume.files.len(), 1);
+        assert_eq!(volume.files[0].id, existing_files[0].id);
+        assert_eq!(volume.files[0].category, existing_files[0].category);
+        assert_eq!(
+            volume.files[0].episode_number,
+            existing_files[0].episode_number
+        );
+        assert_eq!(volume.probe_failures[0].diagnostic, "latest diagnostic");
+        assert_eq!(result.failure.unwrap().diagnostic, "latest diagnostic");
+    }
+
+    #[test]
+    fn successful_probe_retry_adds_only_the_new_file_and_removes_its_failure() {
+        let mut volume = volume();
+        let existing_file = volume.files[0].clone();
+        let retried_file = sample_file("retried-file", "/disc/BDMV/STREAM/00002.m2ts");
+
+        let result = apply_probe_retry_result(
+            &mut volume,
+            "/disc/BDMV/STREAM/00002.m2ts",
+            Ok(retried_file.clone()),
+        )
+        .unwrap();
+
+        assert_eq!(volume.files.len(), 2);
+        assert_eq!(volume.files[0].id, existing_file.id);
+        assert_eq!(volume.files[0].category, existing_file.category);
+        assert_eq!(volume.files[0].episode_number, existing_file.episode_number);
+        assert_eq!(volume.files[1].id, "retried-file");
+        assert!(volume.probe_failures.is_empty());
+        assert_eq!(result.file.unwrap().id, retried_file.id);
+    }
+}
+
 #[tauri::command]
 async fn load_multiple_bdmvs(
     paths: Vec<String>,
@@ -1434,6 +1618,7 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             // BDMV Loading
             load_bdmv,
+            retry_probe_failure,
             load_multiple_bdmvs,
             scan_for_volumes,
             // File Classification
