@@ -13,6 +13,7 @@ on:
       - "index.html"
       - "scripts/verify-platform-icons.mjs"
       - "scripts/smoke-macos-window.swift"
+      - "scripts/smoke-macos-recovery.sh"
       - "scripts/smoke-windows-interface.ps1"
       - "scripts/smoke-installed-close.ps1"
       - "src/**"
@@ -32,6 +33,7 @@ on:
       - "index.html"
       - "scripts/verify-platform-icons.mjs"
       - "scripts/smoke-macos-window.swift"
+      - "scripts/smoke-macos-recovery.sh"
       - "scripts/smoke-windows-interface.ps1"
       - "scripts/smoke-installed-close.ps1"
       - "src/**"
@@ -401,7 +403,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - run: npm ci
       - run: node scripts/verify-platform-icons.mjs
-      - name: Test media-tool launch errors on macOS
+      - name: Test recovery opener errors and Rust behavior on macOS
         run: cargo test --manifest-path src-tauri/Cargo.toml --no-default-features
       - name: Build macOS app and disk image
         run: npm run tauri -- build --bundles app,dmg --ci
@@ -544,6 +546,13 @@ jobs:
           fi
 
           echo "The app launched from the mounted DMG and rendered its main interface."
+      - name: Verify recovery opens the preserved backup from the mounted DMG app
+        shell: bash
+        run: |
+          brew install duti
+          dmg="$(find src-tauri/target/release/bundle/dmg -maxdepth 1 -type f -name '*.dmg' -print -quit)"
+          test -n "$dmg" || { echo "Tauri did not produce a macOS disk image." >&2; exit 1; }
+          bash scripts/smoke-macos-recovery.sh "$dmg" "$RUNNER_TEMP/bdmv-remuxer-recovery-smoke"
       - name: Install MKVToolNix for the packaged remux check
         run: brew install mkvtoolnix
       - name: Run a remux with the app bundled in the mounted DMG
