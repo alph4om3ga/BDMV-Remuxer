@@ -460,6 +460,24 @@ fn write_settings_atomically_with(
     contents: &[u8],
     replace: impl FnOnce(&Path, &Path) -> std::io::Result<()>,
 ) -> Result<(), String> {
+    write_settings_atomically_with_operations(
+        path,
+        contents,
+        |temporary_file, contents| {
+            temporary_file
+                .write_all(contents)
+                .and_then(|()| temporary_file.sync_all())
+        },
+        replace,
+    )
+}
+
+fn write_settings_atomically_with_operations(
+    path: &Path,
+    contents: &[u8],
+    write_and_sync: impl FnOnce(&mut fs::File, &[u8]) -> std::io::Result<()>,
+    replace: impl FnOnce(&Path, &Path) -> std::io::Result<()>,
+) -> Result<(), String> {
     static TEMP_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
@@ -491,10 +509,7 @@ fn write_settings_atomically_with(
         }
     };
 
-    if let Err(error) = temporary_file
-        .write_all(contents)
-        .and_then(|()| temporary_file.sync_all())
-    {
+    if let Err(error) = write_and_sync(&mut temporary_file, contents) {
         drop(temporary_file);
         let _ = fs::remove_file(&temporary_path);
         return Err(format!(
@@ -1067,8 +1082,8 @@ impl AppState {
 mod tests {
     use super::{
         settings_directory_for_config_root, source_file_fingerprint,
-        write_settings_atomically_with, AppState, CompletedFile, Project, ProjectStatus, Settings,
-        WorkspaceData,
+        write_settings_atomically_with, write_settings_atomically_with_operations, AppState,
+        CompletedFile, Project, ProjectStatus, Settings, WorkspaceData,
     };
     use crate::bdmv::{ProbeFailure, Track, Volume};
     use chrono::Utc;
@@ -1899,6 +1914,48 @@ mod tests {
                 .count(),
             1,
             "temporary settings file should be removed after failed replacement"
+        );
+
+        std::fs::remove_dir_all(config_dir).unwrap();
+    }
+
+    #[test]
+    fn failed_temporary_settings_write_preserves_existing_file_and_cleans_up_partial_file() {
+        let config_dir = temporary_config_dir();
+        std::fs::create_dir_all(&config_dir).unwrap();
+        let settings_path = config_dir.join("settings.json");
+        let mut previous_settings = Settings::default();
+        previous_settings.mkvmerge_path = "/existing/bin/mkvmerge".into();
+        let previous_contents = serde_json::to_vec(&previous_settings).unwrap();
+        std::fs::write(&settings_path, &previous_contents).unwrap();
+
+        let error = write_settings_atomically_with_operations(
+            &settings_path,
+            br#"{"mkvmerge_path":"new"}"#,
+            |temporary_file, contents| {
+                temporary_file.write_all(&contents[..8])?;
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    "simulated temporary settings write failure",
+                ))
+            },
+            |_, _| panic!("replacement must not run after a temporary write failure"),
+        )
+        .unwrap_err();
+
+        assert!(error.contains("simulated temporary settings write failure"));
+        assert_eq!(std::fs::read(&settings_path).unwrap(), previous_contents);
+        let reloaded = Settings::load_with_recovery(&config_dir);
+        assert!(reloaded.can_save);
+        assert!(reloaded.recovery_warning.is_none());
+        assert_eq!(reloaded.settings.mkvmerge_path, "/existing/bin/mkvmerge");
+        assert_eq!(
+            std::fs::read_dir(&config_dir)
+                .unwrap()
+                .filter_map(Result::ok)
+                .count(),
+            1,
+            "partial temporary settings file should be removed after failed write"
         );
 
         std::fs::remove_dir_all(config_dir).unwrap();
