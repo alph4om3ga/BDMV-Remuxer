@@ -881,6 +881,12 @@ input:focus, select:focus {
   font-size: 12px;
 }
 
+.settings-recovery-success {
+  margin-top: 10px;
+  color: #22c55e;
+  font-size: 12px;
+}
+
 .recovery-settings-copy { color: var(--text-secondary); font-size: 12px; }
 
 .recovery-restore-modal { width: 600px; }

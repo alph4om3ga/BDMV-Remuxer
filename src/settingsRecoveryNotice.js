@@ -4,6 +4,7 @@ export function getSettingsLoadUpdate(response) {
     recoveryWarning: response.recovery_warning,
     recoveryBackupAvailable: response.recovery_backup_available,
     settingsSaveAllowed: response.settings_save_allowed,
+    recoveryRetryAvailable: response.recovery_retry_available,
     recoveryBackupOpenError: null,
   };
 }
@@ -15,6 +16,7 @@ export function getSettingsSaveSuccessUpdate(settings, recoveryWarning = null) {
     recoveryWarning,
     recoveryBackupAvailable: false,
     settingsSaveAllowed: true,
+    recoveryRetryAvailable: false,
     recoveryBackupOpenError: null,
   };
 }

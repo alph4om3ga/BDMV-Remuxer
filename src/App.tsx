@@ -382,6 +382,7 @@ interface SettingsModalProps {
   settings: SettingsType;
   recoveryBackupAvailable: boolean;
   settingsSaveAllowed: boolean;
+  recoveryRetryAvailable: boolean;
   recoveryWarning: string | null;
   onRestoreBackup: () => void;
   onClose: () => void;
@@ -391,14 +392,17 @@ const SettingsModal: React.FC<SettingsModalProps> = ({
   settings: initialSettings,
   recoveryBackupAvailable,
   settingsSaveAllowed,
+  recoveryRetryAvailable,
   recoveryWarning,
   onRestoreBackup,
   onClose,
 }) => {
-  const { saveSettings } = useAppStore();
+  const { saveSettings, retryRecoveryCopy, isRetryingRecoveryCopy } = useAppStore();
   const [settings, setSettings] = useState<SettingsType>(initialSettings);
   const [browseError, setBrowseError] = useState<string | null>(null);
   const [saveError, setSaveError] = useState<string | null>(null);
+  const [recoveryRetryError, setRecoveryRetryError] = useState<string | null>(null);
+  const [recoveryRetrySucceeded, setRecoveryRetrySucceeded] = useState(false);
   const saveState = getSettingsSaveState(settingsSaveAllowed, recoveryWarning);
   
   const handleSave = async () => {
@@ -408,6 +412,17 @@ const SettingsModal: React.FC<SettingsModalProps> = ({
       onClose();
     } else {
       setSaveError(useAppStore.getState().error || 'Settings could not be saved.');
+    }
+  };
+
+  const handleRetryRecoveryCopy = async () => {
+    setRecoveryRetryError(null);
+    setRecoveryRetrySucceeded(false);
+    const succeeded = await retryRecoveryCopy();
+    if (succeeded) {
+      setRecoveryRetrySucceeded(true);
+    } else {
+      setRecoveryRetryError(useAppStore.getState().error || 'Could not create a recovery copy.');
     }
   };
 
@@ -588,6 +603,35 @@ const SettingsModal: React.FC<SettingsModalProps> = ({
               </div>
             </div>
           )}
+          {(recoveryRetryAvailable || recoveryRetrySucceeded) && (
+            <div className="settings-group">
+              <h4>Preference Recovery</h4>
+              {recoveryRetryAvailable && (
+                <>
+                  <p className="recovery-settings-copy">
+                    Saving is disabled until the damaged preferences file has been preserved.
+                    Retry creating a separate recovery copy; the original file will not be replaced.
+                  </p>
+                  <button
+                    className="btn secondary"
+                    onClick={handleRetryRecoveryCopy}
+                    disabled={isRetryingRecoveryCopy}
+                  >
+                    <RotateCw size={15} />
+                    {isRetryingRecoveryCopy ? 'Creating recovery copy…' : 'Retry recovery copy'}
+                  </button>
+                </>
+              )}
+              {recoveryRetrySucceeded && (
+                <p className="settings-recovery-success" role="status">
+                  Recovery copy created. Saving is now enabled.
+                </p>
+              )}
+              {recoveryRetryError && (
+                <p className="settings-error" role="alert">{recoveryRetryError}</p>
+              )}
+            </div>
+          )}
         </div>
         <div className="modal-footer">
           <button className="btn secondary" onClick={onClose}>Cancel</button>
@@ -725,6 +769,7 @@ const App: React.FC = () => {
     recoveryWarning,
     recoveryBackupAvailable,
     settingsSaveAllowed,
+    recoveryRetryAvailable,
     recoveryBackupOpenError,
     recoveryRestorePreview,
     recoveryRestoreError,
@@ -1071,6 +1116,7 @@ const App: React.FC = () => {
           settings={settings}
           recoveryBackupAvailable={recoveryBackupAvailable}
           settingsSaveAllowed={settingsSaveAllowed}
+          recoveryRetryAvailable={recoveryRetryAvailable}
           recoveryWarning={recoveryWarning}
           onRestoreBackup={previewRecoveryBackup}
           onClose={() => setShowSettings(false)}

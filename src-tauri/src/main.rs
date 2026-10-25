@@ -1290,6 +1290,7 @@ async fn get_settings(state: State<'_, AppStateType>) -> Result<SettingsResponse
         recovery_warning: app_state.settings_recovery_warning().map(str::to_string),
         recovery_backup_available: app_state.settings_recovery_backup_path().is_some(),
         settings_save_allowed: app_state.settings_can_save(),
+        recovery_retry_available: app_state.settings_recovery_retry_available(),
     })
 }
 
@@ -1299,6 +1300,23 @@ struct SettingsResponse {
     recovery_warning: Option<String>,
     recovery_backup_available: bool,
     settings_save_allowed: bool,
+    recovery_retry_available: bool,
+}
+
+#[tauri::command]
+async fn retry_settings_recovery_copy(
+    state: State<'_, AppStateType>,
+) -> Result<SettingsResponse, String> {
+    let config_dir = settings_config_dir()?;
+    let mut app_state = state.lock();
+    app_state.retry_settings_recovery_copy(&config_dir)?;
+    Ok(SettingsResponse {
+        settings: app_state.settings.clone(),
+        recovery_warning: app_state.settings_recovery_warning().map(str::to_string),
+        recovery_backup_available: app_state.settings_recovery_backup_path().is_some(),
+        settings_save_allowed: app_state.settings_can_save(),
+        recovery_retry_available: app_state.settings_recovery_retry_available(),
+    })
 }
 
 #[tauri::command]
@@ -1386,7 +1404,7 @@ async fn restore_settings_recovery_backup(
     let mut app_state = state.lock();
     app_state.settings = saved_settings.clone();
     let warning = saved_settings.unrecognized_fields_warning();
-    app_state.set_settings_recovery(warning.clone(), None, true);
+    app_state.set_settings_recovery(warning.clone(), None, true, None);
     Ok(SettingsSaveResponse {
         settings: saved_settings,
         recovery_warning: warning,
@@ -1404,7 +1422,7 @@ async fn save_settings(
     let saved_settings = settings.save_to_config_dir(&config_dir)?;
     let warning = saved_settings.unrecognized_fields_warning();
     app_state.settings = saved_settings.clone();
-    app_state.set_settings_recovery(warning.clone(), None, true);
+    app_state.set_settings_recovery(warning.clone(), None, true, None);
     Ok(SettingsSaveResponse {
         settings: saved_settings,
         recovery_warning: warning,
@@ -1550,6 +1568,7 @@ fn main() {
         settings_outcome.recovery_warning,
         settings_outcome.recovery_backup_path,
         settings_outcome.can_save,
+        settings_outcome.recovery_source_hash,
     );
     if recovery_smoke.is_none() {
         if let Err(error) = restored_state.restore_workspace(&config_dir) {
@@ -1694,6 +1713,7 @@ fn main() {
             confirm_close,
             // Settings
             get_settings,
+            retry_settings_recovery_copy,
             open_settings_recovery_backup,
             preview_settings_recovery_backup,
             restore_settings_recovery_backup,

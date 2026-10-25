@@ -5,6 +5,7 @@ interface SettingsResponse {
   recovery_warning: string | null;
   recovery_backup_available: boolean;
   settings_save_allowed: boolean;
+  recovery_retry_available: boolean;
 }
 
 export function getSettingsLoadUpdate(response: SettingsResponse): {
@@ -12,6 +13,7 @@ export function getSettingsLoadUpdate(response: SettingsResponse): {
   recoveryWarning: string | null;
   recoveryBackupAvailable: boolean;
   settingsSaveAllowed: boolean;
+  recoveryRetryAvailable: boolean;
   recoveryBackupOpenError: null;
 };
 export function getSettingsSaveSuccessUpdate(
@@ -23,6 +25,7 @@ export function getSettingsSaveSuccessUpdate(
   recoveryWarning: string | null;
   recoveryBackupAvailable: false;
   settingsSaveAllowed: true;
+  recoveryRetryAvailable: false;
   recoveryBackupOpenError: null;
 };
 export function getSettingsSaveState(

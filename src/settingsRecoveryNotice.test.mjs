@@ -108,10 +108,12 @@ test('settings save is disabled with the recovery explanation when preservation 
     recovery_warning: warning,
     recovery_backup_available: false,
     settings_save_allowed: false,
+    recovery_retry_available: true,
   }));
   const saveState = getSettingsSaveState(state.settingsSaveAllowed, state.recoveryWarning);
 
   assert.equal(state.settingsSaveAllowed, false);
+  assert.equal(state.recoveryRetryAvailable, true);
   assert.equal(saveState.disabled, true);
   assert.equal(saveState.warning, warning);
 });

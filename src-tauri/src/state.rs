@@ -194,6 +194,7 @@ impl Settings {
                     settings,
                     recovery_backup_path: None,
                     can_save: true,
+                    recovery_source_hash: None,
                 },
                 Err(parse_error) => match preserve_damaged_settings(config_dir, &contents) {
                     Ok(backup_path) => SettingsLoadOutcome {
@@ -207,6 +208,7 @@ impl Settings {
                         )),
                         recovery_backup_path: Some(backup_path),
                         can_save: true,
+                        recovery_source_hash: None,
                     },
                     Err(backup_error) => SettingsLoadOutcome {
                         settings: Self::default(),
@@ -220,6 +222,7 @@ impl Settings {
                         )),
                         recovery_backup_path: None,
                         can_save: false,
+                        recovery_source_hash: Some(format!("{:x}", Sha256::digest(&contents))),
                     },
                 },
             },
@@ -228,6 +231,7 @@ impl Settings {
                 recovery_warning: None,
                 recovery_backup_path: None,
                 can_save: true,
+                recovery_source_hash: None,
             },
             Err(error) => SettingsLoadOutcome {
                 settings: Self::default(),
@@ -239,8 +243,55 @@ impl Settings {
                 )),
                 recovery_backup_path: None,
                 can_save: false,
+                recovery_source_hash: None,
             },
         }
+    }
+
+    pub fn retry_preserve_damaged_settings(
+        config_dir: &Path,
+        expected_source_hash: &str,
+    ) -> Result<PathBuf, String> {
+        let settings_path = config_dir.join(Self::FILE_NAME);
+        let contents = fs::read(&settings_path).map_err(|error| {
+            format!(
+                "Could not read the damaged preferences file at {}: {}",
+                settings_path.display(),
+                error
+            )
+        })?;
+        let source_hash = format!("{:x}", Sha256::digest(&contents));
+        if source_hash != expected_source_hash {
+            return Err(format!(
+                "The preferences file at {} changed after it was loaded. Restart the app to review the current file before saving.",
+                settings_path.display()
+            ));
+        }
+        if serde_json::from_slice::<Self>(&contents).is_ok() {
+            return Err(format!(
+                "The preferences file at {} is no longer damaged. Restart the app to load its current contents before saving.",
+                settings_path.display()
+            ));
+        }
+
+        let backup_path = preserve_damaged_settings(config_dir, &contents)?;
+        let current_contents = fs::read(&settings_path).map_err(|error| {
+            let _ = fs::remove_file(&backup_path);
+            format!(
+                "Could not verify that the preferences file at {} stayed unchanged while its recovery copy was created: {}",
+                settings_path.display(),
+                error
+            )
+        })?;
+        if format!("{:x}", Sha256::digest(&current_contents)) != expected_source_hash {
+            let _ = fs::remove_file(&backup_path);
+            return Err(format!(
+                "The preferences file at {} changed while its recovery copy was being created. Saving remains disabled; restart the app to review the current file.",
+                settings_path.display()
+            ));
+        }
+
+        Ok(backup_path)
     }
 
     pub fn save_to_config_dir(&self, config_dir: &Path) -> Result<Self, String> {
@@ -559,6 +610,7 @@ pub struct SettingsLoadOutcome {
     pub recovery_warning: Option<String>,
     pub recovery_backup_path: Option<PathBuf>,
     pub can_save: bool,
+    pub recovery_source_hash: Option<String>,
 }
 
 fn preserve_damaged_settings(config_dir: &Path, contents: &[u8]) -> Result<PathBuf, String> {
@@ -833,6 +885,7 @@ pub struct AppState {
     persistence_error: Option<String>,
     settings_recovery_warning: Option<String>,
     settings_recovery_backup_path: Option<PathBuf>,
+    settings_recovery_source_hash: Option<String>,
     settings_save_blocked: bool,
 }
 
@@ -842,9 +895,11 @@ impl AppState {
         warning: Option<String>,
         backup_path: Option<PathBuf>,
         can_save: bool,
+        recovery_source_hash: Option<String>,
     ) {
         self.settings_recovery_warning = warning;
         self.settings_recovery_backup_path = backup_path;
+        self.settings_recovery_source_hash = recovery_source_hash;
         self.settings_save_blocked = !can_save;
     }
 
@@ -854,6 +909,27 @@ impl AppState {
 
     pub fn settings_recovery_backup_path(&self) -> Option<&Path> {
         self.settings_recovery_backup_path.as_deref()
+    }
+
+    pub fn settings_recovery_retry_available(&self) -> bool {
+        self.settings_recovery_source_hash.is_some()
+    }
+
+    pub fn retry_settings_recovery_copy(&mut self, config_dir: &Path) -> Result<(), String> {
+        let expected_source_hash = self
+            .settings_recovery_source_hash
+            .as_deref()
+            .ok_or_else(|| "There is no pending preferences recovery copy to retry.".to_string())?;
+        let backup_path =
+            Settings::retry_preserve_damaged_settings(config_dir, expected_source_hash)?;
+        self.settings_recovery_warning = Some(format!(
+            "The damaged preferences file was preserved at {}. You can review the backup or save new preferences.",
+            backup_path.display()
+        ));
+        self.settings_recovery_backup_path = Some(backup_path);
+        self.settings_recovery_source_hash = None;
+        self.settings_save_blocked = false;
+        Ok(())
     }
 
     pub fn settings_can_save(&self) -> bool {
@@ -944,6 +1020,7 @@ mod tests {
     };
     use crate::bdmv::{ProbeFailure, Track, Volume};
     use chrono::Utc;
+    use sha2::{Digest, Sha256};
     use std::collections::HashMap;
     use std::fs::OpenOptions;
     use std::io::Write;
@@ -1434,16 +1511,83 @@ mod tests {
 
     #[test]
     fn settings_saving_is_blocked_when_recovery_copy_could_not_be_made() {
+        let config_dir = temporary_config_dir();
+        std::fs::create_dir_all(&config_dir).unwrap();
         let mut state = AppState::default();
         state.set_settings_recovery(
             Some("Could not preserve damaged preferences.".into()),
             None,
             false,
+            Some("source-hash".into()),
         );
 
         assert!(!state.settings_can_save());
         let error = state.ensure_settings_savable().unwrap_err();
         assert!(error.contains("Could not preserve damaged preferences"));
+
+        let retry_error = state.retry_settings_recovery_copy(&config_dir).unwrap_err();
+        assert!(retry_error.contains("Could not read the damaged preferences file"));
+        assert!(!state.settings_can_save());
+        assert!(state.settings_recovery_retry_available());
+
+        std::fs::remove_dir_all(config_dir).unwrap();
+    }
+
+    #[test]
+    fn retrying_recovery_copy_preserves_original_and_unlocks_saving() {
+        let config_dir = temporary_config_dir();
+        std::fs::create_dir_all(&config_dir).unwrap();
+        let settings_path = config_dir.join(Settings::FILE_NAME);
+        let original_contents = b"{ malformed preferences";
+        std::fs::write(&settings_path, original_contents).unwrap();
+        let source_hash = format!("{:x}", Sha256::digest(original_contents));
+
+        let mut state = AppState::default();
+        state.set_settings_recovery(
+            Some("Could not preserve damaged preferences.".into()),
+            None,
+            false,
+            Some(source_hash),
+        );
+        assert!(!state.settings_can_save());
+        assert!(state.settings_recovery_retry_available());
+
+        state.retry_settings_recovery_copy(&config_dir).unwrap();
+
+        let backup_path = state.settings_recovery_backup_path().unwrap();
+        assert_eq!(std::fs::read(&settings_path).unwrap(), original_contents);
+        assert_eq!(std::fs::read(backup_path).unwrap(), original_contents);
+        assert!(state.settings_can_save());
+        assert!(!state.settings_recovery_retry_available());
+        assert!(state
+            .settings_recovery_warning()
+            .unwrap()
+            .contains("was preserved"));
+
+        std::fs::remove_dir_all(config_dir).unwrap();
+    }
+
+    #[test]
+    fn retrying_recovery_copy_refuses_a_changed_preferences_file() {
+        let config_dir = temporary_config_dir();
+        std::fs::create_dir_all(&config_dir).unwrap();
+        let settings_path = config_dir.join(Settings::FILE_NAME);
+        let original_contents = b"{ malformed preferences";
+        std::fs::write(&settings_path, original_contents).unwrap();
+        let source_hash = format!("{:x}", Sha256::digest(original_contents));
+        std::fs::write(&settings_path, br#"{"mkvmerge_path":"new value"}"#).unwrap();
+
+        let error =
+            Settings::retry_preserve_damaged_settings(&config_dir, &source_hash).unwrap_err();
+
+        assert!(error.contains("changed after it was loaded"));
+        assert_eq!(
+            std::fs::read(&settings_path).unwrap(),
+            br#"{"mkvmerge_path":"new value"}"#
+        );
+        assert!(!config_dir.join("settings.json.corrupt").exists());
+
+        std::fs::remove_dir_all(config_dir).unwrap();
     }
 
     #[test]

@@ -44,6 +44,8 @@ interface AppStore {
   recoveryWarning: string | null;
   recoveryBackupAvailable: boolean;
   settingsSaveAllowed: boolean;
+  recoveryRetryAvailable: boolean;
+  isRetryingRecoveryCopy: boolean;
   recoveryBackupOpenError: string | null;
   recoveryRestorePreview: SettingsRecoveryPreview | null;
   recoveryRestoreError: string | null;
@@ -77,6 +79,7 @@ interface AppStore {
   resumeMuxing: () => Promise<void>;
   stopMuxing: () => Promise<void>;
   loadSettings: () => Promise<void>;
+  retryRecoveryCopy: () => Promise<boolean>;
   openRecoveryBackup: () => Promise<void>;
   previewRecoveryBackup: () => Promise<void>;
   restoreRecoveryBackup: () => Promise<void>;
@@ -100,6 +103,8 @@ export const useAppStore = create<AppStore>((set, get) => ({
   recoveryWarning: null,
   recoveryBackupAvailable: false,
   settingsSaveAllowed: true,
+  recoveryRetryAvailable: false,
+  isRetryingRecoveryCopy: false,
   recoveryBackupOpenError: null,
   recoveryRestorePreview: null,
   recoveryRestoreError: null,
@@ -374,10 +379,33 @@ export const useAppStore = create<AppStore>((set, get) => ({
         recovery_warning: string | null;
         recovery_backup_available: boolean;
         settings_save_allowed: boolean;
+        recovery_retry_available: boolean;
       }>('get_settings');
       set(getSettingsLoadUpdate(response));
     } catch (e) {
       set({ error: String(e) });
+    }
+  },
+
+  retryRecoveryCopy: async () => {
+    set({ isRetryingRecoveryCopy: true, error: null });
+    try {
+      const response = await invoke<{
+        settings: Settings;
+        recovery_warning: string | null;
+        recovery_backup_available: boolean;
+        settings_save_allowed: boolean;
+        recovery_retry_available: boolean;
+      }>('retry_settings_recovery_copy');
+      set({
+        ...getSettingsLoadUpdate(response),
+        isRetryingRecoveryCopy: false,
+        error: null,
+      });
+      return true;
+    } catch (e) {
+      set({ isRetryingRecoveryCopy: false, error: String(e) });
+      return false;
     }
   },
 
